@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scales Feedback</title>
+<meta name="description" content="Sing your scale exercises along with the piano and see whether you hit each note.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1a2b'/%3E%3Crect x='5' y='20' width='22' height='3' fill='%239e2a3a'/%3E%3Crect x='8' y='7' width='5' height='11' rx='2' fill='%23d4b26a'/%3E%3Crect x='17' y='4' width='5' height='14' rx='2' fill='%238bd3f7'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..700&family=Instrument+Sans:wght@400..700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="bar">
+  <button id="libBtn" class="ex-btn" title="Choose an exercise (E)"><span id="exName">Choose an exercise</span><span id="exSub" class="sub">No file open</span></button>
+
+  <div class="group transport" aria-label="Transport">
+    <button id="prevBtn" title="Previous key (←)" aria-label="Previous key"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+    <button id="playBtn" class="play" title="Play or pause (Space)" aria-label="Play"><svg id="playIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg></button>
+    <button id="nextBtn" title="Next key (→)" aria-label="Next key"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+    <button id="restartBtn" title="Back to the start (Home)" aria-label="Back to the start"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 12a8 8 0 1 0 2.5-5.8"/><path d="M4 4v4h4"/></svg></button>
+  </div>
+
+  <div class="group tempo" aria-label="Tempo">
+    <button id="bpmDown" title="Slower (↓, Shift for 1)" aria-label="Slower">−</button>
+    <label class="bpm"><input id="bpmIn" type="number" min="20" max="400" step="1" aria-label="Tempo in beats per minute"><span>bpm</span></label>
+    <button id="bpmUp" title="Faster (↑, Shift for 1)" aria-label="Faster">+</button>
+    <button id="bpmReset" class="link" title="Back to the tempo written in the file">file <span id="bpmFile">–</span></button>
+  </div>
+
+  <div class="group seg" id="guideSeg" aria-label="What the piano plays while you sing">
+    <button data-guide="on" aria-pressed="true" title="The piano plays the notes you sing (G)">Play my notes</button>
+    <button data-guide="off" aria-pressed="false" title="Only the chord sounds; the notes keep their timing on screen (G)">Chord only</button>
+  </div>
+
+  <div class="group seg" id="voiceSeg" hidden aria-label="Which voice you sing"></div>
+
+  <div class="spacer"></div>
+
+  <button id="loopBtn" title="Repeat this key until you turn it off (L)" aria-pressed="false">Repeat key</button>
+  <button id="micBtn" class="mic" title="Listen through the microphone (M)" aria-pressed="false"><span class="meter"><i id="micMeter"></i></span><span id="micLabel">Mic off</span></button>
+  <button id="outBtn" class="out" title="Sound: where the notes play"><span class="dot" id="outDot"></span><span id="outLabel">Synth</span></button>
+  <button id="setBtn" class="icon-btn" title="Settings (S)" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  <button id="resBtn" class="icon-btn" title="Results (R)" aria-label="Results"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="16" y="4" width="4" height="16" rx="1"/></svg></button>
+  <button id="helpBtn" class="icon-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+</header>
+
+<nav id="keys" class="keys" aria-label="Keys in this exercise"></nav>
+
+<main id="stage">
+  <canvas id="cv"></canvas>
+  <div class="hud" aria-live="polite">
+    <div class="hud-left">
+      <div id="hudKey" class="keyname"></div>
+      <div id="hudInfo" class="info"></div>
+    </div>
+    <div class="tuner" id="tuner">
+      <div class="t-head"><span id="tTarget">Mic off</span><span id="tSyl" class="syl"></span></div>
+      <div class="t-main"><span id="tNote" class="t-note">–</span><span id="tCents" class="t-cents"></span></div>
+      <div class="t-meter" aria-hidden="true"><div id="tZones" class="zones"></div><i class="mid"></i><i id="tNeedle" class="needle"></i></div>
+      <div class="t-scale" aria-hidden="true"><span>flat</span><span>sharp</span></div>
+      <div class="t-foot"><span id="tState">Press M to listen</span><span id="tLast"></span></div>
+    </div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+  <div id="calib" class="calib" hidden>
+    <div class="big" style="font-weight:650;font-size:16px">Stay quiet for a few seconds</div>
+    <div class="hint" style="color:var(--muted);margin-top:4px">The piano plays a run of notes so the app can learn how it sounds in your room.</div>
+    <div class="prog"><i id="calibProg"></i></div>
+  </div>
+  <div id="empty" class="empty">
+    <div class="card">
+      <h1>Sing along, see every note</h1>
+      <p>Open one of your exercise MIDI files. The app works out the reference chords, the keys and what you sing from the file itself, so a new exercise from the generator works as soon as it exists.</p>
+      <p>Link the folder the generator writes to (<b>python_final</b>) and every exercise in it shows up here, new ones included. You can also drop .mid files anywhere on this page.</p>
+      <div class="row">
+        <button id="emptyLink" class="primary">Link exercise folder</button>
+        <button id="emptyAdd">Add MIDI files</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- library -->
+<aside id="lib" class="drawer left" aria-label="Exercises">
+  <header><h2>Exercises</h2><button class="link" data-close>Close</button></header>
+  <div id="folderBox"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="addFilesBtn">Add MIDI files</button>
+    <input id="fileIn" type="file" accept=".mid,.midi,audio/midi" multiple hidden>
+    <input id="dirIn" type="file" webkitdirectory hidden>
+  </div>
+  <p class="hint">Files you add are kept in this browser. Drop them anywhere on the page too.</p>
+  <input id="libSearch" type="search" placeholder="Find an exercise" style="width:100%;margin-top:6px" aria-label="Find an exercise">
+  <div id="libList" class="lib-list"></div>
+</aside>
+
+<!-- settings -->
+<aside id="set" class="drawer right" aria-label="Settings">
+  <header><h2>Settings</h2><button class="link" data-close>Close</button></header>
+
+  <h3>Sound</h3>
+  <div class="seg" id="outSeg" style="display:inline-flex">
+    <button data-out="midi">Piano</button>
+    <button data-out="samples">Samples</button>
+    <button data-out="synth">Built-in</button>
+  </div>
+  <div id="outStatus" class="status"></div>
+  <div id="midiBox">
+    <div class="field"><label for="midiPort">Piano output</label><select id="midiPort"></select></div>
+    <div class="field"><label for="midiCh">MIDI channel</label><select id="midiCh"></select></div>
+  </div>
+  <div id="samplesBox">
+    <div id="samplesInfo" class="status"></div>
+    <div class="row"><button id="importSamples">Import samples zip</button><button id="removeSamples">Remove the samples</button></div>
+    <input id="zipIn" type="file" accept=".zip,application/zip" hidden>
+    <p class="hint">A zip of mNNN_name_vVVV.wav recordings, like the one recorded from the P-225. It stays in this browser and is never uploaded.</p>
+  </div>
+  <div class="field"><label for="velAcc">Chord touch</label><span class="val" id="velAccV"></span><input id="velAcc" type="range" min="1" max="127" style="grid-column:1/-1"></div>
+  <div class="field"><label for="velSing">Your notes touch</label><span class="val" id="velSingV"></span><input id="velSing" type="range" min="1" max="127" style="grid-column:1/-1"></div>
+  <p class="hint">The files are written at full velocity; these set how hard the piano plays instead.</p>
+
+  <h3>Listening</h3>
+  <div class="field full"><label for="micSel">Microphone</label><select id="micSel"></select><div class="lvl" aria-hidden="true"><i id="micLvl"></i></div></div>
+  <div id="micStatus" class="status" role="status"></div>
+  <div id="micWarn" class="warn" hidden></div>
+  <div class="field"><label for="gate">Ignore sounds below</label><span class="val" id="gateV"></span><input id="gate" type="range" min="-80" max="-20" step="1" style="grid-column:1/-1"></div>
+  <div class="field"><label for="tol">Counts as hit within</label><span class="val" id="tolV"></span><input id="tol" type="range" min="10" max="60" step="5" style="grid-column:1/-1"></div>
+  <div class="field"><label for="grace">Not judged at each note's start and end</label><span class="val" id="graceV"></span><input id="grace" type="range" min="0" max="300" step="10" style="grid-column:1/-1"></div>
+  <p class="hint">While your voice moves from one note to the next. Up to a third of a note at each end, so short notes are still judged.</p>
+  <label class="check"><input type="checkbox" id="octFree"> Any octave counts</label>
+  <div class="field"><label for="lat">Mic delay</label><span class="val" id="latV"></span><input id="lat" type="range" min="0" max="250" step="5" style="grid-column:1/-1"></div>
+  <p class="hint">If your pitch line below the keys trails the notes, raise the mic delay until they line up.</p>
+
+  <h3>Hear me over the piano</h3>
+  <div class="field full"><label for="refSel">The piano's USB audio</label><select id="refSel"></select><div class="lvl" aria-hidden="true"><i id="refLvl"></i></div></div>
+  <div class="row"><button id="refAsk" hidden>Ask Chrome for the piano’s input</button></div>
+  <p class="hint">With the P-225 connected by USB it shows up as an input called Line (P-Series).</p>
+  <p class="hint" id="fileHint" hidden>Opened straight from the disk, Chrome hides the inputs and asks for each one, every time: once for the mic, then again for the piano (choose Line (P-Series) in its box). Open the app from <a href="https://yonabenreuven2.github.io/scales-feedback/">its GitHub Pages address</a> instead and it connects to both by itself.</p>
+  <label class="check"><input type="checkbox" id="refOn"> Cancel the piano's sound from the mic</label>
+  <p class="hint">For singing without headphones. The app learns how the piano's sound reaches your mic and subtracts it, so only your voice is left. Calibrate once with the mic where you sing: it learns every key in a few seconds and remembers them. A key it hasn't learned isn't scored while the piano plays it.</p>
+  <div id="refStatus" class="status"></div>
+  <div id="refBox">
+    <div class="row"><button id="calibBtn">Calibrate (about 12 seconds, stay quiet)</button><button id="refForget" class="link">Forget what it learned</button></div>
+  </div>
+  <div class="row"><button id="devReport" class="link">Copy a device report</button></div>
+  <p class="hint">If the mic or the piano’s input won’t work, this copies what the browser says about your inputs, to paste into a message.</p>
+  <textarea id="devReportOut" class="report" rows="8" readonly hidden></textarea>
+
+  <h3>Practice</h3>
+  <label class="check"><input type="checkbox" id="skipOn"> Skip keys outside my range</label>
+  <div class="row range-pair"><label for="rangeLo">From</label><input id="rangeLo" type="text" value="E2"><label for="rangeHi">to</label><input id="rangeHi" type="text" value="A4"></div>
+  <label class="check"><input type="checkbox" id="shuffleOn"> Shuffle the keys</label>
+  <div class="field"><label for="preroll">Lead-in before the first chord</label><span class="val" id="prerollV"></span><input id="preroll" type="range" min="0" max="4" step="0.5" style="grid-column:1/-1"></div>
+  <div class="field"><label for="ahead">Notes visible ahead</label><span class="val" id="aheadV"></span><input id="ahead" type="range" min="1.5" max="8" step="0.5" style="grid-column:1/-1"></div>
+  <div class="field"><label for="labels">Note labels</label><select id="labels"><option value="solfege">Solfège (movable do)</option><option value="names">Note names</option><option value="none">None</option></select></div>
+  <label class="check"><input type="checkbox" id="histOn"> Show my pitch below the keys</label>
+  <label class="check"><input type="checkbox" id="fullKb"> Full 88-key keyboard</label>
+  <label class="check"><input type="checkbox" id="pedalOn"> The piano's sustain pedal plays and pauses</label>
+
+  <h3>This exercise</h3>
+  <div id="exInfo" class="hint"></div>
+  <div id="partsBox"></div>
+</aside>
+
+<!-- results -->
+<aside id="res" class="drawer right" aria-label="Results">
+  <header><h2>Results</h2><button class="link" data-close>Close</button></header>
+  <div id="resNow"></div>
+  <div class="row" style="margin-top:10px"><button id="weakBtn">Practise the weak keys</button><button id="allKeysBtn" class="link">All keys again</button></div>
+  <h3>Earlier runs of this exercise</h3>
+  <canvas id="spark" class="spark"></canvas>
+  <div id="resHist"></div>
+  <div class="row" style="margin-top:12px"><button id="csvBtn">Export all results (CSV)</button><button id="clearHist" class="link">Clear this exercise's history</button></div>
+</aside>
+
+<div id="help" class="modal" hidden>
+  <div class="card" role="dialog" aria-label="Keyboard shortcuts">
+    <h2>Keyboard shortcuts</h2>
+    <div class="keys-table">
+      <kbd>Space</kbd><span>Play or pause</span>
+      <kbd>←</kbd><span>Back to the start of this key, then the key before</span>
+      <kbd>→</kbd><span>Next key</span>
+      <kbd>↑ ↓</kbd><span>Tempo up or down by 5 (with Shift, by 1)</span>
+      <kbd>Home</kbd><span>Back to the first key</span>
+      <kbd>G</kbd><span>Play my notes or chord only</span>
+      <kbd>V</kbd><span>Next voice (in exercises with voices)</span>
+      <kbd>L</kbd><span>Repeat this key</span>
+      <kbd>M</kbd><span>Microphone on or off</span>
+      <kbd>N</kbd><span>Note labels: solfège, names, none</span>
+      <kbd>[ ]</kbd><span>Notes fall slower or faster</span>
+      <kbd>E</kbd><span>Exercises</span>
+      <kbd>S</kbd><span>Settings</span>
+      <kbd>R</kbd><span>Results</span>
+      <kbd>?</kbd><span>This list</span>
+    </div>
+    <p class="hint" style="color:var(--muted);margin-top:14px">Dashed notes are yours to sing without the piano. Brass notes are the piano's chords; the mic never listens to them.</p>
+    <div class="row" style="justify-content:flex-end;margin-top:8px"><button data-close>Close</button></div>
+  </div>
+</div>
+
+<script src="js/core.js"></script>
+<script src="js/midifile.js"></script>
+<script src="js/analyze.js"></script>
+<script src="js/player.js"></script>
+<script src="js/pitch.js"></script>
+<script src="js/echo.js"></script>
+<script src="js/ears.js"></script>
+<script src="js/scoring.js"></script>
+<script src="js/outputs.js"></script>
+<script src="js/samples.js"></script>
+<script src="js/listen.js"></script>
+<script src="js/library.js"></script>
+<script src="js/render.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

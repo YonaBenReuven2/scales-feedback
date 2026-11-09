@@ -1,0 +1,6 @@
+# never publish the piano samples or recordings
+*.zip
+*.wav
+node_modules/
+.DS_Store
+Thumbs.db

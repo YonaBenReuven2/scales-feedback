@@ -1,0 +1,116 @@
+# Scales feedback
+
+Practise the singing exercises from `../python` (the MIDI files in `python_final`) with the notes falling onto a piano keyboard, Synthesia style. The microphone tells you whether you hit each note. It never listens during the reference chords.
+
+The app has no list of known exercises. It reads each MIDI file from scratch: where the reference chords are, which line you sing, how many voices there are and what key each round is in. A new exercise from the generator works as soon as the file exists.
+
+## Opening it
+
+Open **https://yonabenreuven2.github.io/scales-feedback/** (to publish it there, see *GitHub Pages* at the end of this file).
+
+On an https address Chrome remembers what you allowed: the mic, the piano's audio, the piano (MIDI) and the exercise folder. So everything you used last time connects by itself when the page opens. When Chrome asks, choose *Allow while visiting the site* (or *Allow on every visit* for the folder). The first time, it asks once for the mic: choose your mic in its box. After that the app can see every input by name, so it opens *Line (P-Series)* for the piano filter by itself.
+
+Opening `index.html` straight from the disk works too, but Chrome remembers nothing there and hides the inputs' names. It asks for every input separately, every time: once for the mic, then a second time for the piano's audio, where you choose *Line (P-Series)* in its box. The folder needs a click too. The disk copy and the Pages site keep separate settings, so link the folder and import the samples once in each.
+
+Use Chrome or Edge. Firefox and Safari have no Web MIDI, so they can't play the P-225.
+
+## First time
+
+1. **Exercises:** press **Link exercise folder** and pick `python_final`. Every `.mid` in it shows up, and new ones appear the next time you open the app or the list. You can also add files, or drop them on the page.
+2. **Sound** (Settings):
+   - **Piano** plays the P-225 over USB MIDI. Connect the USB cable and choose **Piano**; the browser asks once for MIDI access.
+   - **Samples** plays a zip of recordings, like `p225-samples.zip`. The zip is stored in this browser only. It is never uploaded and never part of the site.
+   - **Built-in** is a simple synth, for when nothing else is available.
+3. **Touch:** the files are written at full velocity. The two touch sliders set how hard the chords and your notes are played instead.
+4. **Microphone:** press **M**, or the mic button. The first time, the browser asks to use the microphone and lets you choose one in its box. If that box is left on the piano (Windows often makes *Line (P-Series)* its default input), the app opens your real mic instead. Settings shows which mic it's listening with, and a bar under it shows what it hears. Picking another mic in the list switches to it straight away. Avoid a Bluetooth headset mic: it switches the headphones to call quality.
+
+## Practising
+
+- **Play my notes / Chord only:** with *Chord only* the piano plays just the reference chords. Your notes are drawn dashed and keep their timing as if they were played.
+- **Voices:** in exercises with several voices, choose the one you sing and the others keep playing. *Any* plays them all and scores whichever voice you sing.
+- **The tuner** (top right) shows what you sing, how many cents off you are, and the last note's verdict. Under the keyboard, your pitch trace is drawn against the notes you just sang.
+- **Verdicts:** within the tolerance (Settings, 35 cents by default) is a hit. Within twice the tolerance is close. Anything further is off, and too little voice counts as not heard.
+- **Grace at each note's edges** (Settings, 120 ms by default): the start and end of each note aren't judged, while your voice moves from one note to the next. It's at most a third of the note at each end, so short notes are still judged.
+- **Results** (R) lists every key of this session, and **Practise the weak keys** loops only the ones under 70%. **Export all results** saves a CSV.
+- **Practice settings:** *Skip keys outside my range*, *Shuffle*, *Repeat key*, a lead-in before the first chord, and solfège (movable do, la-based minor), note names or no labels.
+
+| Key | Does |
+| --- | --- |
+| Space | Play or pause (the piano's sustain pedal can do this too, see Settings) |
+| ← → | Previous / next key |
+| ↑ ↓ | Tempo ±5 (Shift: ±1) |
+| Home | Back to the first key |
+| G | Play my notes or chord only |
+| V | Next voice |
+| L | Repeat this key |
+| M | Microphone on or off |
+| N | Note labels |
+| [ ] | Notes fall slower / faster |
+| E S R | Exercises, Settings, Results |
+
+## Singing without headphones (the piano filter)
+
+The P-225 sends its own sound to the computer over USB. In Windows it shows up as an audio input, *Line (P-Series)*. The app learns how that sound reaches your mic, through the speakers and the room. It subtracts it from the mic so only your voice is left, even when you sing the same note the piano plays.
+
+1. In Settings, under **Hear me over the piano**, pick *Line (P-Series)* in **The piano's USB audio** (the list fills once the mic is on; opened from the disk it stays empty, so press **Ask Chrome for the piano's input** and choose *Line (P-Series)* in Chrome's box). Picking it turns the filter on, and the bar under the list moves when you play a key. Ticking **Cancel the piano's sound from the mic** does the same with the piano's input found automatically. Next time it reconnects by itself, also when the piano is switched on after the page is open.
+2. Press **Calibrate**. The piano plays a quick run of every key in the exercise's range, then three chords, while you stay quiet. It takes about 12 seconds.
+
+The calibration is remembered for that piano input and mic pair. Calibrate again after moving the laptop, the mic or the piano's volume.
+
+How it behaves:
+
+- **Keys it hasn't heard aren't scored** while the piano plays them, so the piano can never sing a note for you. Without calibrating, it only learns the keys of the reference chords as they go by. That's enough for *Chord only*, but not for *Play my notes*.
+- **Filter status:** Settings shows the measured delay between the piano and the mic, how many dB of the piano it removes, and how many keys it knows. 25 dB or more is good.
+- **Loud piano, quiet voice:** when too much of the piano is left for your voice to stand out, the app can't tell whether you sang. Those notes get no verdict rather than *not heard*, and it says so. Calibrating, turning the piano down a little or sitting closer to the mic all help.
+
+If an input won't open, the line under it says why (blocked by the browser, used by another program, unplugged, or no answer). **Copy a device report**, at the end of this section, copies what the browser says about every input, to paste into a message.
+
+## Making new exercises
+
+Nothing needs registering. The app expects what the generator already writes:
+
+- **Scales:** each round is a reference chord followed by the line to sing. Later rounds are transposed copies of the first. The key of each round comes from its reference chord, and key-signature events are not needed or used.
+- **Songs** (no repeating rounds): the file is split into sections at the phrase breaks, and each section gets its own key from its notes.
+- **What gets sung:** a track whose name contains *sing, voice, vocal, melody, lead, soprano, alto, tenor* or *baritone* is sung, and everything else plays. Without such names, single-line parts are sung and chords play.
+- **Voices:** parts that move together are numbered from the top. An exercise can only score a voice that is in the file. In `voices_hard`, the melody that isn't written in the file can't be scored, but the voices that are written can.
+
+## Privacy
+
+Exercise files you add, the samples zip, the results and the room calibration are all kept in this browser's storage, under the name `scales-feedback`. Nothing is sent anywhere.
+
+## GitHub Pages
+
+1. On GitHub, create an empty **public** repository named `scales-feedback` (no README, licence or .gitignore, so the first push goes in cleanly).
+2. Push this folder to it. `.gitignore` keeps zips and wav files out, so the piano samples are never published.
+
+   ```
+   cd C:\Users\yonab\Singing\scales-feedback
+   git init -b main
+   git add .
+   git commit -m "Scales feedback app"
+   git remote add origin https://github.com/yonabenreuven2/scales-feedback.git
+   git push -u origin main
+   ```
+
+3. On the repository's page: **Settings**, **Pages**, *Deploy from a branch*, branch `main`, folder `/ (root)`, **Save**.
+4. After a minute or two the site is at `https://yonabenreuven2.github.io/scales-feedback/`. Later changes go live a minute after each push.
+
+It shares the `yonabenreuven2.github.io` origin with the other pages there, including the mic and MIDI permissions. Its storage keys all start with `scales-feedback`, so nothing clashes.
+
+## Tests
+
+```
+node --test tests/*.test.js
+```
+
+The tests cover:
+
+- the MIDI parser;
+- the analysis of every exercise in `tests/fixtures`, plus exercises made up in the tests;
+- the player's timing;
+- finding and opening the mic and the piano's input the way Chrome on Windows lists them (names hidden until allowed, or always on a page opened from the disk; Windows' default input; a piano input that is busy or never answers);
+- scoring;
+- pitch detection;
+- the samples zip reader;
+- the listening engine;
+- the piano filter in a simulated room. These cases take about a minute.

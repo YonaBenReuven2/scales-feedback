@@ -118,6 +118,26 @@
       this.onsets++;
       return this.estimate();
     }
+    /** Add one window to a running sum of (whitened) cross-spectra: in a room where the piano
+     *  reaches the mic mostly by reflections no single window is clear, but together they are. */
+    accumulate(mic, ref) {
+      this.spectrum(mic, ref);
+      const N = this.N;
+      if (!this.accR) {
+        this.accR = new Float64Array(N);
+        this.accI = new Float64Array(N);
+        this.accN = 0;
+      }
+      for (let k = 0; k < N; k++) {
+        const m = Math.hypot(this.cr[k], this.ci[k]) + 1e-20;
+        this.accR[k] += this.cr[k] / m;
+        this.accI[k] += this.ci[k] / m;
+      }
+      this.accN++;
+      this.cr.set(this.accR);
+      this.ci.set(this.accI);
+      return this.peak();
+    }
     /** One window on its own: {lag, conf} of the clearest peak (no history, no threshold). */
     measure(mic, ref) {
       this.spectrum(mic, ref);
@@ -206,6 +226,8 @@
       this.delay = null;
       this.history = [];
       this.onsets = 0;
+      this.accR = null;
+      this.accN = 0;
     }
   }
 
@@ -224,7 +246,9 @@
       this.Srr = new Float64Array(this.K);
       this.a = new Float64Array(this.N);
       this.b = new Float64Array(this.N);
-      this.pre = opts.pre || 256; // taps before the main delay (estimation slack)
+      // taps before the main delay: slack for a delay measured a little late (when the mic
+      // hears the piano mostly by reflections, the strongest of them can pass for it)
+      this.pre = opts.pre || 256;
       this.Lh = opts.taps || Math.round(sampleRate * 0.17);
       this.forget = opts.forget || 0.985;
       this.updates = 0;
@@ -690,6 +714,17 @@
       const runs = this.runs || (this.runs = []);
       runs.push({ at: end, levelDb: 10 * Math.log10(r.em / r.ex), cancelDb: r.solved && r.er > 0 ? 10 * Math.log10(r.em / r.er) : null });
       while (runs.length > 8 || (runs.length && end - runs[0].at > this.sr * 90)) runs.shift();
+      // a room taken over from last time: keep it only if it removes the piano now (judged on
+      // three chords; if it can't even be lined up with the mic over six, it doesn't fit either)
+      if (this.trial) {
+        this.trial.runs++;
+        const c = this.recentCancel;
+        const bad = (c != null && this.trial.runs >= 3 && c < 3) || (c == null && this.trial.runs >= 6);
+        if (bad) {
+          this.reset();
+          this.dropped = (this.dropped || 0) + 1;
+        } else if (c != null && this.trial.runs >= 3) this.trial = null;
+      }
     }
     /** How much the piano's level at the mic moved between recent chords (dB). */
     get micDrift() {
@@ -762,9 +797,18 @@
       // Until the room is known: the delay between the raw streams, from quiet stretches.
       // (Afterwards that number shifts with which notes play, since the room delays low and
       // high notes differently; the room model takes care of that, so it is no longer used.)
-      if (!this.solved && this.n - this.lastGcc >= sr * 0.08 && this.n >= L && struck && quietWin) {
+      // Every quiet stretch of piano also adds to a running sum, which settles the delay where
+      // no single window is clear enough (a room where reflections reach the mic first).
+      let accD = null;
+      if (this.delay == null && this.n - (this.lastAcc || -Infinity) >= sr * 0.25 && this.n >= L && quietWin && this.refPeak(this.n - L, this.n) > 1e-7) {
+        this.lastAcc = this.n;
+        const pk = this.tracker.accumulate(this.copy(this.micR, this.n, this.tmpL), this.copy(this.refR, this.n, this.tmpL2));
+        // a fallback only: where single windows are clear they settle it first, and better
+        if (this.tracker.accN >= 8 && pk.conf >= 8 && !this.tracker.history.length) accD = pk.lag;
+      }
+      if (accD != null || (!this.solved && this.n - this.lastGcc >= sr * 0.08 && this.n >= L && struck && quietWin)) {
         this.lastGcc = this.n;
-        const d = this.tracker.add(this.copy(this.micR, this.n, this.tmpL), this.copy(this.refR, this.n, this.tmpL2), false);
+        const d = accD != null ? accD : this.tracker.add(this.copy(this.micR, this.n, this.tmpL), this.copy(this.refR, this.n, this.tmpL2), false);
         if (d != null && d !== this.lastAccepted) {
           this.lastAccepted = d;
           const at = this.n - L / 2; // the onset sits early in the window
@@ -916,6 +960,17 @@
     importState(st) {
       if (!st || st.v !== 2 || st.sr !== this.sr || !st.hc || st.hc.length !== this.room.pre + this.room.Lh) return false;
       this.saved = st;
+      if (this.delay == null && st.delay != null) {
+        // Same inputs as last time: start from what was learned then, at once (the delay need
+        // not be measured again first). If it no longer fits (the laptop moved, the volume
+        // changed), the next few chords show it and it is dropped.
+        this.dUsed = this.delay = st.delay;
+        this.alignPos = Math.max(this.done, this.n);
+        this.dpts = [];
+        this.useSaved();
+        this.saved = null;
+        this.trial = { runs: 0 };
+      }
       return true;
     }
     useSaved() {
@@ -1063,6 +1118,8 @@
       this.kN.fill(0);
       this.runs = [];
       this.run = null;
+      this.trial = null;
+      this.lastAcc = -Infinity;
       this.vref = null;
       this.restored = false;
       this.alignPos = this.n;

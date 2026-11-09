@@ -36,10 +36,11 @@
       this.lastLevel = -Infinity;
       this.lastStatus = -Infinity;
       this.lastSave = -Infinity;
-      // the last RECORD_SEC seconds, for "Save the last 40 seconds" (tuning the filter to a room)
+      // the last recordSec seconds, for "Save the last 40 seconds" (tuning the filter to a room)
       this.rec = [];
       this.recFrames = [];
       this.recPlans = [];
+      this.recordSec = RECORD_SEC;
     }
     handle(m) {
       switch (m.type) {
@@ -87,6 +88,7 @@
     }
     start(m) {
       this.sr = m.sr;
+      this.recordSec = m.recordSec || RECORD_SEC;
       this.hasRef = !!m.hasRef;
       this.gateDb = m.gateDb;
       if (!this.tracker || this.tracker.det.sr !== this.sr) this.tracker = new SF.PitchTracker(this.sr, { gateDb: m.gateDb, minClarity: m.minClarity });
@@ -152,7 +154,7 @@
       const quiet = this.expectQuiet((t0 + t1) / 2);
       pf.push(a, this.hasRef ? b : null, quiet, onset, events);
       this.rec.push({ f, a, b, perf: m.perf, ctx: m.ctx, q: quiet ? 1 : 0 });
-      while (this.rec.length && f - this.rec[0].f > RECORD_SEC * this.sr) this.rec.shift();
+      while (this.rec.length && f - this.rec[0].f > this.recordSec * this.sr) this.rec.shift();
       // levels for the meters
       let sm = 0;
       let sr2 = 0;
@@ -173,7 +175,7 @@
         this.post({ type: 'frame', fr });
         const r3 = (x) => (x == null ? null : Math.round(x * 1000) / 1000);
         this.recFrames.push([this.pfFrame0 + end, fr.source, fr.voiced ? r3(fr.midi) : null, fr.why || null, r3(fr.presence), r3(fr.dev), r3(fr.clarity), r3(fr.raw), Math.round(fr.micDb), Math.round(fr.echoDb)]);
-        while (this.recFrames.length && this.pfFrame0 + end - this.recFrames[0][0] > RECORD_SEC * this.sr) this.recFrames.shift();
+        while (this.recFrames.length && this.pfFrame0 + end - this.recFrames[0][0] > this.recordSec * this.sr) this.recFrames.shift();
       }
       const now = m.perf;
       if (now - this.lastLevel > 60) {
@@ -209,7 +211,7 @@
         },
       });
     }
-    /** The last RECORD_SEC seconds of both inputs, with what was decided about them. */
+    /** The last recordSec seconds of both inputs, with what was decided about them. */
     dump() {
       const rec = this.rec;
       const n = rec.reduce((k, r) => k + r.a.length, 0);

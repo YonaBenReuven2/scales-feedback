@@ -53,6 +53,29 @@
   // ---------- small numeric helpers ----------
   SF.clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
+  /**
+   * What the piano plays to calibrate the filter, from lo to hi: three chords (it finds the
+   * delay and a first idea of the room), a quick run over the range (teaches it every key),
+   * then each key alone, as loud as the notes sung to (measures how much of each key is left).
+   * Returns {notes: [{p, vel, t, d}] (ms from the start), dur}.
+   */
+  SF.calibrationNotes = (lo, hi, velAcc, velSing) => {
+    const notes = [];
+    const keys = [];
+    for (let m = lo; m <= hi; m++) keys.push(m);
+    const step = Math.max(260, Math.min(320, 9000 / keys.length));
+    const vel = Math.max(velAcc, velSing);
+    [[0, 4, 7], [-5, 0, 4], [-3, 0, 5]].forEach((ch, j) => {
+      for (const d of ch) notes.push({ p: SF.clamp(lo + 12 + d, 21, 108), vel: velAcc, t: j * 700, d: 600 });
+    });
+    const tq = 3 * 700 + 300;
+    const fast = Math.max(110, Math.min(160, 6000 / keys.length));
+    keys.forEach((m, i) => notes.push({ p: m, vel, t: tq + i * fast, d: 2.2 * fast }));
+    const tr = tq + keys.length * fast + 700;
+    keys.forEach((m, i) => notes.push({ p: m, vel, t: tr + i * step, d: 0.82 * step }));
+    return { notes, dur: tr + keys.length * step + 1200 };
+  };
+
   /** A two-channel 32-bit float WAV (a left, b right), with data (JSON) in an extra "sfjs"
    *  chunk that players ignore. */
   SF.wavWithData = (a, b, sr, data) => {

@@ -201,7 +201,7 @@ registerProcessor('sf-capture', SFCapture);`;
       return this.ears ? this.ears.pf : null;
     }
     startEngine() {
-      this.lastStart = { type: 'start', sr: this.sr, hasRef: !!this.refStream, gateDb: this.gateDb, minClarity: this.minClarity, saved: this.savedRoom || null };
+      this.lastStart = { type: 'start', sr: this.sr, hasRef: !!this.refStream, gateDb: this.gateDb, minClarity: this.minClarity, saved: this.savedRoom || null, recordSec: this.recordSec || 40 };
       this.status = null;
       this.send(this.lastStart);
       this.sendPlan();

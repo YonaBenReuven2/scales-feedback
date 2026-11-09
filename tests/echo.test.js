@@ -60,6 +60,7 @@ function scene(o) {
   const dur = t + 0.6;
   const ref = R.piano(ev, sr, dur);
   let room;
+  if (o.roomSeed) R.reseed(o.roomSeed); // the same room in two sessions
   if (!o.harsh) room = R.shift(R.convolve(ref, R.roomIR(sr, { rt60: 0.35 })), 0.0283 * sr, o.drift || 0);
   else {
     // a harder room: speakers that distort a little, an echo longer than the filter models,
@@ -111,8 +112,8 @@ function scene(o) {
 }
 
 /** Streams the scene through the filter as the app does; returns what each sung frame said. */
-function run(sc) {
-  const pf = new SF.PianoFilter(sr, {});
+function run(sc, pf0) {
+  const pf = pf0 || new SF.PianoFilter(sr, {});
   const tr = new SF.PitchTracker(sr, { size: 2048 });
   const W = 2048;
   const inSung = (t) => sc.sung.some((s) => t >= s.t - 0.25 && t < s.t + s.d + 0.25);
@@ -192,7 +193,7 @@ test('clock drift between the two devices is followed', () => {
   assert.ok(r.voiced / r.frames > 0.7, 'still hears the voice ' + JSON.stringify(r.src));
   assert.ok(Math.abs(SF.median(r.cents)) < 5, 'in tune: ' + SF.median(r.cents));
   const silent = run(scene({ calib: true, drift: 40e-6 }));
-  assert.strictEqual(silent.voiced, 0, 'nothing from the piano alone: ' + JSON.stringify(silent.src));
+  assert.strictEqual(silent.voiced, 0, 'nothing from the piano alone: ' + JSON.stringify(silent.src) + ' ' + JSON.stringify(silent.why) + ' delay ' + (silent.pf.dUsed / sr * 1000).toFixed(2) + ' cancel ' + silent.pf.cancelDb.toFixed(1) + ' realigns ' + (silent.pf.realigns || 0));
 });
 
 test('in a harder room, singing off the piano’s note is heard however much piano is left', () => {
@@ -221,4 +222,14 @@ test('a mic that changes its own volume as you sing (Windows effects) is noticed
   assert.ok(ok.pf.micDrift < 7 && ok.pf.recentCancel >= 5, 'steady mic: drift ' + ok.pf.micDrift + ', cancels ' + ok.pf.recentCancel);
   const r = run(scene({ calib: true, voiceDb: -6, cents: -10, agc: true }));
   assert.ok(r.pf.micDrift >= 7 || r.pf.recentCancel < 5, 'drift ' + r.pf.micDrift + ', cancels ' + r.pf.recentCancel);
+});
+
+test('a room saved from last time is used at once', () => {
+  const st = run(scene({ calib: true, roomSeed: 77 })).pf.exportState();
+  const pf = new SF.PianoFilter(sr, {});
+  pf.importState(st);
+  assert.ok(pf.ready, 'ready before hearing a note');
+  const r = run(scene({ voiceDb: -6, cents: -10, seed: 5, roomSeed: 77 }), pf);
+  assert.ok(r.voiced / r.frames > 0.6, 'hears the voice from the first key: ' + JSON.stringify(r.src));
+  assert.ok(!pf.dropped, 'kept it');
 });

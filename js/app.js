@@ -442,7 +442,7 @@
   let micEffectsTold = false;
   /** The piano's level at the mic jumps between chords, or little of it can be removed: a mic
    *  with its own automatic volume or noise suppression (Windows' effects), not the room. */
-  const micEffects = (f) => !!(f && f.ready && (f.micDrift >= 7 || (f.runCancel != null && f.runCancel < 5)));
+  const micEffects = (f) => !!(f && f.ready && (f.micDrift >= 7 || (f.measured > 0 && f.runCancel != null && f.runCancel < 5)));
   function updateRefUI() {
     $('refOn').checked = !!S.refOn;
     $('refBox').hidden = !S.refOn;
@@ -454,7 +454,7 @@
     else if (!listener.running) st = listener.phase ? 'Waiting for the microphone first.' : 'Starts when the microphone is on.';
     else if (refNote) st = refNote;
     else if (!f) st = 'Not connected to the piano audio.';
-    else if (f.delayMs == null) st = 'Waiting for the piano to play: it measures the delay from the first notes.';
+    else if (f.delayMs == null) st = 'Measuring how late the piano reaches the mic, from the chords. To start at once, press Calibrate (15 to 20 seconds, stay quiet).';
     else if (!f.ready) st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Learning the room from the chords, or press Calibrate.';
     else {
       st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Removes about ' + Math.round(f.cancelDb) + ' dB of the piano' + (f.restored ? ' (remembered from last time)' : '') + '. ';
@@ -1006,35 +1006,13 @@
     const tap = SF.tapOutput(out, (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now()));
     const lo = ex ? SF.clamp(ex.lo - 2, 28, 72) : 40;
     const hi = ex ? SF.clamp(ex.hi + 2, lo + 12, 96) : 76;
-    const notes = [];
-    for (let m = lo; m <= hi; m++) notes.push(m);
-    // each key on its own, as loud as the notes you sing to: the filter measures how much of
-    // every key the room leaves behind (rooms leave much more of some notes than of others)
-    const step = Math.max(260, Math.min(320, 9000 / notes.length));
-    const vel = Math.max(S.velAcc, S.velSing);
-    // first three chords, from which it finds the delay and a first idea of the room (so it
-    // is ready to measure by the time the keys come one by one)
+    const plan = SF.calibrationNotes(lo, hi, S.velAcc, S.velSing);
     const t0 = SF.now() + 600;
-    [[0, 4, 7], [-5, 0, 4], [-3, 0, 5]].forEach((ch, j) => {
-      for (const d of ch) {
-        tap.noteOn(SF.clamp(lo + 12 + d, 21, 108), S.velAcc, t0 + j * 700);
-        tap.noteOff(SF.clamp(lo + 12 + d, 21, 108), t0 + j * 700 + 600);
-      }
-    });
-    // then a quick run over the range, which teaches it every key
-    const tq = t0 + 3 * 700 + 300;
-    const fast = Math.max(110, Math.min(160, 6000 / notes.length));
-    notes.forEach((m, i) => {
-      tap.noteOn(m, vel, tq + i * fast);
-      tap.noteOff(m, tq + i * fast + 2.2 * fast);
-    });
-    // then each key alone, which measures how much of it is left after cancelling
-    const tr = tq + notes.length * fast + 700;
-    notes.forEach((m, i) => {
-      tap.noteOn(m, vel, tr + i * step);
-      tap.noteOff(m, tr + i * step + 0.82 * step);
-    });
-    const end = tr + notes.length * step + 1200;
+    for (const n of plan.notes) {
+      tap.noteOn(n.p, n.vel, t0 + n.t);
+      tap.noteOff(n.p, t0 + n.t + n.d);
+    }
+    const end = t0 + plan.dur;
     await new Promise((res) => {
       const tick = () => {
         const f = SF.clamp((SF.now() - t0 + 600) / (end - t0 + 600), 0, 1);

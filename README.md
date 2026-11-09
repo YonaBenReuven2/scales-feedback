@@ -14,6 +14,10 @@ Opening `index.html` straight from the disk works too, but Chrome remembers noth
 
 Use Chrome or Edge. Firefox and Safari have no Web MIDI, so they can't play the P-225.
 
+**Install it as an app**, like the ear trainer and the practice log. On the Pages site, in Chrome, press the install icon at the right of the address bar (or the menu, *Cast, save and share*, *Install page as app*). On Android, use the menu's *Install app*. It then opens in its own window, also without a connection. It keeps the same settings, permissions, calibration and samples as the site in a tab, since it is the same site. The filter lab opens inside it.
+
+**Updates** need nothing from you. Every time the app opens, it checks the server for newer files and uses them, so there's no need for Ctrl+Shift+R. Without a connection it opens the copy it kept. If a new version is pushed while the app is open, a bar at the bottom says so: **Reload** switches to it (it stops an exercise in progress), **Later** keeps the bar away until the next change.
+
 ## First time
 
 1. **Exercises:** press **Link exercise folder** and pick `python_final`. Every `.mid` in it shows up, and new ones appear the next time you open the app or the list. You can also add files, or drop them on the page.
@@ -115,6 +119,15 @@ Exercise files you add, the samples zip, the results and the room calibration ar
 
 It shares the `yonabenreuven2.github.io` origin with the other pages there, including the mic and MIDI permissions. Its storage keys all start with `scales-feedback`, so nothing clashes.
 
+**The installed app's files:** `manifest.webmanifest`, `icons/`, `sw.js` (the service worker) and `js/pwa.js` (registers it, and offers the reload when files change). The service worker:
+
+- checks with the server on every request (a quick "not modified" when nothing changed), so GitHub Pages' ten-minute caching never holds back a new version;
+- keeps a copy of every file for offline use;
+- reads what to keep from `index.html` and `lab.html` themselves, so it never needs editing when files are added or renamed;
+- only touches caches named `scalesfeedback-…`, never the ear trainer's or the practice log's (cache storage is shared by the whole github.io site).
+
+The `?v=` numbers on the scripts are still bumped when they change, for a page opened without the service worker.
+
 ## Tests
 
 ```
@@ -130,6 +143,7 @@ The tests cover:
 - low notes (below C3), heard by their harmonics and not credited from the piano alone;
 - the clean-up of what the room filter leaves, and a room saved from last time that isn't spoiled by the first chords it hears again;
 - the sound files the app and the lab save, read back;
+- the service worker: what it keeps for offline use, serving the newest files, opening offline, and leaving other sites and other apps' caches alone;
 - finding and opening the mic and the piano's input the way Chrome on Windows lists them (names hidden until allowed, or always on a page opened from the disk; Windows' default input; a piano input that is busy or never answers);
 - scoring;
 - pitch detection;

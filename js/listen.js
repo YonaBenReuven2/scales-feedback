@@ -13,22 +13,27 @@
 
   const WORKLET = `
 class SFCapture extends AudioWorkletProcessor {
-  constructor() {
-    super(); this.B = 512; this.a = new Float32Array(this.B); this.b = new Float32Array(this.B); this.k = 0; this.start = 0; this.alive = true;
+  constructor(o) {
+    super(); this.B = 512; this.st = !!(o && o.processorOptions && o.processorOptions.stereoRef);
+    this.a = new Float32Array(this.B); this.b = new Float32Array(this.B); this.s = this.st ? new Float32Array(this.B) : null; this.k = 0; this.start = 0; this.alive = true;
     this.port.onmessage = (e) => { if (e.data === 'stop') this.alive = false; };
   }
   process(inputs) {
     if (!this.alive) return false;
     const inp = inputs[0] || [];
-    const c0 = inp[0], c1 = inp[1];
+    const c0 = inp[0], c1 = inp[1], c2 = this.st ? inp[2] : null;
     const n = c0 ? c0.length : 128;
     for (let i = 0; i < n; i++) {
       if (this.k === 0) this.start = currentFrame + i;
       this.a[this.k] = c0 ? c0[i] : 0;
-      this.b[this.k] = c1 ? c1[i] : 0;
+      const l = c1 ? c1[i] : 0;
+      if (this.s) { const r = c2 ? c2[i] : 0; this.b[this.k] = 0.5 * (l + r); this.s[this.k] = 0.5 * (l - r); }
+      else this.b[this.k] = l;
       if (++this.k === this.B) {
-        this.port.postMessage({ f: this.start, a: this.a, b: this.b }, [this.a.buffer, this.b.buffer]);
-        this.a = new Float32Array(this.B); this.b = new Float32Array(this.B); this.k = 0;
+        const msg = { f: this.start, a: this.a, b: this.b }; const tr = [this.a.buffer, this.b.buffer];
+        if (this.s) { msg.s = this.s; tr.push(this.s.buffer); }
+        this.port.postMessage(msg, tr);
+        this.a = new Float32Array(this.B); this.b = new Float32Array(this.B); if (this.s) this.s = new Float32Array(this.B); this.k = 0;
       }
     }
     return true;
@@ -224,7 +229,8 @@ registerProcessor('sf-capture', SFCapture);`;
       this.savedRoom = st || null;
       if (st && this.engine) this.send({ type: 'room', st });
     }
-    /** The last 40 seconds of both inputs and what was decided about them: {mic, ref, meta}. */
+    /** The last 40 seconds of both inputs and what was decided about them: {mic, ref, side, meta}
+     *  (side: what differs between the piano's two channels, or null). */
     dump() {
       if (!this.engine || !this.running) return Promise.reject(new Error('the mic is off'));
       return new Promise((res, rej) => {
@@ -556,16 +562,27 @@ registerProcessor('sf-capture', SFCapture);`;
     async build() {
       const ctx = SF.audio.ctx;
       this.teardown();
-      const merger = ctx.createChannelMerger(2);
+      // The piano's audio is stereo: the filter uses the two channels mixed (as Chrome would
+      // mix them), and what differs between them (the side) is kept too, for the recordings.
+      const st = this.refStream ? this.refStream.getAudioTracks()[0] : null;
+      const stereo = !!(st && st.getSettings && st.getSettings().channelCount === 2 && ctx.createChannelSplitter);
+      this.refStereo = stereo;
+      const merger = ctx.createChannelMerger(stereo ? 3 : 2);
       const mic = ctx.createMediaStreamSource(this.micStream);
       mic.connect(merger, 0, 0);
       const nodes = [merger, mic];
       if (this.refStream) {
         const ref = ctx.createMediaStreamSource(this.refStream);
-        ref.connect(merger, 0, 1);
+        if (stereo) {
+          const sp = ctx.createChannelSplitter(2);
+          ref.connect(sp);
+          sp.connect(merger, 0, 1);
+          sp.connect(merger, 1, 2);
+          nodes.push(sp);
+        } else ref.connect(merger, 0, 1);
         nodes.push(ref);
       }
-      const capture = await this.captureNode(ctx);
+      const capture = await this.captureNode(ctx, stereo);
       this.capture = capture;
       merger.connect(capture);
       const sink = ctx.createGain();
@@ -575,10 +592,10 @@ registerProcessor('sf-capture', SFCapture);`;
       nodes.push(capture, sink);
       this.nodes = nodes;
     }
-    async captureNode(ctx) {
+    async captureNode(ctx, stereo) {
       const gen = this.gen;
-      const onBlock = (f, a, b) => {
-        if (gen === this.gen) this.block(f, a, b);
+      const onBlock = (f, a, b, s) => {
+        if (gen === this.gen) this.block(f, a, b, s);
       };
       if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
         const urls = [];
@@ -592,8 +609,8 @@ registerProcessor('sf-capture', SFCapture);`;
           try {
             if (!this.workletLoaded) await ctx.audioWorklet.addModule(u);
             this.workletLoaded = true;
-            const node = new AudioWorkletNode(ctx, 'sf-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit', outputChannelCount: [1] });
-            node.port.onmessage = (e) => onBlock(e.data.f, e.data.a, e.data.b);
+            const node = new AudioWorkletNode(ctx, 'sf-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: stereo ? 3 : 2, channelCountMode: 'explicit', channelInterpretation: 'discrete', outputChannelCount: [1], processorOptions: { stereoRef: !!stereo } });
+            node.port.onmessage = (e) => onBlock(e.data.f, e.data.a, e.data.b, e.data.s);
             this.mode = 'worklet';
             return node;
           } catch (e) {
@@ -601,7 +618,7 @@ registerProcessor('sf-capture', SFCapture);`;
           }
         }
       }
-      // last resort
+      // last resort (the piano's two channels arrive mixed here)
       const sp = ctx.createScriptProcessor(1024, 2, 1);
       let f = null;
       sp.onaudioprocess = (e) => {
@@ -627,12 +644,14 @@ registerProcessor('sf-capture', SFCapture);`;
       if (!this.running || !this.refStream) return;
       this.send({ type: 'keys', events: [{ t: at + 8, p: 'all', on: false }] });
     }
-    /** A captured block: on to the engine, stamped with the page clock. */
-    block(f, a, b) {
+    /** A captured block: on to the engine, stamped with the page clock. s: the piano's side
+     *  (half its left minus right), when it is stereo. */
+    block(f, a, b, s) {
       if (!this.running) return;
       const ctx = SF.audio.ctx;
       const m = { type: 'block', f, a, b, perf: SF.now(), ctx: ctx.currentTime };
-      if (this.engine && this.engine.kind === 'worker') this.send(m, [a.buffer, b.buffer]);
+      if (s) m.s = s;
+      if (this.engine && this.engine.kind === 'worker') this.send(m, s ? [a.buffer, b.buffer, s.buffer] : [a.buffer, b.buffer]);
       else this.send(m);
     }
     setGate(db) {

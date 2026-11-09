@@ -34,6 +34,7 @@ main { max-width: 760px; margin: 0 auto; padding: 28px 16px 64px; }
 header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 h1 { font-family: var(--serif); font-weight: 560; font-size: 30px; margin: 0; font-variation-settings: 'opsz' 72; }
 h2 { font-size: 16px; font-weight: 650; margin: 0 0 10px; }
+h3 { font-size: 14px; font-weight: 600; margin: 18px 0 8px; color: var(--muted); }
 a { color: var(--voice); }
 p { margin: 8px 0; }
 .lead { color: var(--muted); max-width: 64ch; }
@@ -65,8 +66,13 @@ input[type='range'] { accent-color: var(--voice); width: 100%; }
 .num b { display: block; font-size: 24px; font-weight: 600; }
 .num span { color: var(--muted); font-size: 13px; }
 canvas { width: 100%; height: 150px; display: block; background: var(--ink); border: 1px solid var(--line); border-radius: 10px; }
+canvas.tall { height: 220px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin-right: 3px; }
+.dot:last-of-type { margin-right: 6px; }
+.dot.ring { background: transparent; border: 1.5px solid var(--muted); width: 7px; height: 7px; }
 .legend { display: flex; gap: 16px; color: var(--muted); font-size: 13px; margin: 6px 0 14px; flex-wrap: wrap; }
 .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+.legend > span { white-space: nowrap; }
 .players { display: grid; gap: 8px; }
 .players button { text-align: left; display: flex; justify-content: space-between; gap: 12px; }
 .players button small { color: var(--muted); }
@@ -106,34 +112,42 @@ canvas { width: 100%; height: 150px; display: block; background: var(--ink); bor
     <p id="phase" class="big" hidden></p>
     <div class="prog" id="progBox" hidden><i id="prog"></i></div>
     <p id="runStatus" class="status"></p>
+    <div class="row" style="margin-top:14px"><button id="openBtn">Open a saved recording</button><input id="openFile" type="file" accept=".wav,audio/wav" hidden><span class="hint">Runs a test you saved before through the filter as it is now.</span></div>
+    <p id="openStatus" class="status"></p>
   </section>
 
   <section id="results" hidden>
     <h2>What the filter did</h2>
     <div class="nums">
       <div class="num"><b id="nDelay">–</b><span>Delay from the piano’s audio to the mic</span></div>
-      <div class="num"><b id="nCal">–</b><span>Piano removed while you were quiet</span></div>
+      <div class="num"><b id="nCal">–</b><span id="nCalNote">Piano removed while you were quiet</span></div>
       <div class="num"><b id="nSing">–</b><span>Of your sung notes it could hear</span></div>
+      <div class="num"><b id="nVoice">–</b><span>Your voice against the piano playing your notes, at the mic (above 0: you were louder)</span></div>
     </div>
     <p id="verdict"></p>
+    <h3>What it heard you sing</h3>
+    <canvas id="pitchChart" class="tall" width="1400" height="440" aria-label="Pitch over time: the notes to sing, and the pitch the app heard"></canvas>
+    <div class="legend"><span><i style="background:#2c4a73;height:10px"></i>The notes to sing</span><span><b class="dot" style="background:#5bd69b"></b><b class="dot" style="background:#f2c14e"></b><b class="dot" style="background:#f07a6a"></b>Heard as you: on pitch, close, off</span><span><b class="dot ring"></b>A pitch it read but couldn’t tell from the piano</span></div>
+    <h3>Level over time</h3>
     <canvas id="chart" width="1400" height="300" aria-label="Level over time: the mic, and what was left after removing the piano"></canvas>
     <div class="legend"><span><i style="background:#c3cddc;height:4px"></i>The mic</span><span><i style="background:#8bd3f7"></i>What’s left after removing the piano</span><span><i style="background:#2a3a56;height:10px"></i>Calibration</span><span><i style="background:#24395c;height:10px"></i>Your sung notes</span></div>
     <div class="row" style="margin-bottom:10px"><label class="field"><input id="wholeOn" type="checkbox"> Play the whole test, not just the singing</label></div>
     <div class="players">
       <button data-track="mic">The mic <small>the piano and you, as the room heard it</small></button>
-      <button data-track="res">What’s left <small>should be just your voice</small></button>
+      <button data-track="post">What’s left <small>after removing the piano: should be mostly your voice</small></button>
+      <button data-track="res">Before the clean-up <small>what the room filter alone leaves</small></button>
       <button data-track="echo">The piano, as the filter predicts the mic hears it <small>what it removes</small></button>
       <button data-track="ref">The piano’s own audio <small>from the USB cable</small></button>
     </div>
     <div class="row" style="margin-top:14px"><button id="saveBtn">Save the recording</button><span class="hint">A sound file of both inputs with what the app decided, to send for tuning the filter.</span></div>
   </section>
 </main>
-<script src="js/core.js?v=9"></script>
-<script src="js/pitch.js?v=9"></script>
-<script src="js/echo.js?v=9"></script>
-<script src="js/ears.js?v=9"></script>
-<script src="js/outputs.js?v=9"></script>
-<script src="js/listen.js?v=9"></script>
-<script src="js/lab.js?v=9"></script>
+<script src="js/core.js?v=10"></script>
+<script src="js/pitch.js?v=10"></script>
+<script src="js/echo.js?v=10"></script>
+<script src="js/ears.js?v=10"></script>
+<script src="js/outputs.js?v=10"></script>
+<script src="js/listen.js?v=10"></script>
+<script src="js/lab.js?v=10"></script>
 </body>
 </html>

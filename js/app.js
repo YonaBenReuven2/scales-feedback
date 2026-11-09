@@ -1225,8 +1225,9 @@
     updateRefUI();
     updateMicUI();
   };
-  // "Save the last 40 seconds": both inputs as a two-channel sound file (mic left, the piano's
-  // audio right), with what the app decided about every moment inside it, to tune the filter
+  // "Save the last 40 seconds": both inputs as a sound file (mic left, the piano's audio right,
+  // and what differs between the piano's two channels third when it is stereo), with what the
+  // app decided about every moment inside it, to tune the filter
   $('recSave').onclick = async () => {
     let d;
     try {
@@ -1235,7 +1236,7 @@
       return toast('Turn on the mic (and the piano filter) and sing a little first.');
     }
     d.meta.app = { exercise: ex ? ex.name : null, voice: player.cfg.voice, guide: player.cfg.guide, bpm: player.bpm, velAcc: S.velAcc, velSing: S.velSing, grace: S.grace, tol: S.tol, latency: S.latency, mic: listener.micLabel, piano: listener.refLabel, at: new Date().toISOString() };
-    const blob = SF.wavWithData(d.mic, d.ref, d.meta.sr, d.meta);
+    const blob = SF.wavWithData(d.mic, d.ref, d.meta.sr, d.meta, d.side);
     const name = 'scales-feedback-take-' + new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-') + '.wav';
     try {
       if (window.showSaveFilePicker) {

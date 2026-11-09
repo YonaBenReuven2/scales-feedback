@@ -211,6 +211,16 @@ test('in a harder room, singing the very note the piano plays is heard when it s
   assert.ok(Math.abs(SF.median(r.cents) + 8) < 8, 'reads ' + SF.median(r.cents));
 });
 
+test('in a harder room, a voice 12 dB under the piano on its very note is heard by its own harmonics', () => {
+  // the room leaves about as much of the piano as the voice: by loudness alone it can't tell,
+  // but the voice's harmonics stand far above the piano's leftover at several frequencies
+  const r = run(scene({ calib: true, harsh: true, voiceDb: -12, cents: -8, vibrato: 8, seed: 3 }));
+  assert.ok(r.voiced / r.frames > 0.8, 'heard ' + r.voiced + ' of ' + r.frames + ' ' + JSON.stringify(r.src));
+  assert.ok((r.why['its own harmonics'] || 0) > 0.3 * r.frames, JSON.stringify(r.why));
+  assert.ok((r.wrong || 0) <= 0.03 * r.frames, 'misread ' + r.wrong);
+  assert.ok(Math.abs(SF.median(r.cents) + 8) < 8, 'reads ' + SF.median(r.cents));
+});
+
 test('in a harder room, the piano alone almost never passes for a voice', () => {
   const r = run(scene({ calib: true, harsh: true, seed: 3 }));
   assert.ok(r.voiced <= 0.03 * r.frames, r.voiced + ' of ' + r.frames + ' frames: ' + JSON.stringify(r.src));
@@ -224,6 +234,38 @@ test('a mic that changes its own volume as you sing (Windows effects) is noticed
   assert.ok(r.pf.micDrift >= 7 || r.pf.recentCancel < 5, 'drift ' + r.pf.micDrift + ', cancels ' + r.pf.recentCancel);
 });
 
+test('the clean-up takes out more of the piano and keeps the voice', () => {
+  const sc = scene({ calib: true, harsh: true, voiceDb: -6, cents: -8, seed: 3 });
+  const pf = new SF.PianoFilter(sr, {});
+  pf.postR = new Float32Array(pf.cap);
+  const r = run(sc, pf);
+  const n = sc.mic.length;
+  const res = new Float32Array(n);
+  const echo = new Float32Array(n);
+  for (let i = Math.max(0, n - pf.cap + 1); i < n && i < pf.done; i++) {
+    res[i] = pf.resR[i & pf.mask];
+    echo[i] = pf.echoR[i & pf.mask];
+  }
+  const post = SF.cleanUp(pf.spec, res, echo, 4);
+  const sung = (t) => sc.sung.some((s) => t >= s.t && t < s.t + s.d);
+  let rq = 0;
+  let pq = 0;
+  let rs = 0;
+  let ps = 0;
+  for (let i = Math.max(0, n - pf.cap + 1); i < pf.done; i++) {
+    if (sung(i / sr)) {
+      rs += res[i] * res[i];
+      ps += post[i] * post[i];
+    } else if (echo[i] !== 0) {
+      rq += res[i] * res[i];
+      pq += post[i] * post[i];
+    }
+  }
+  assert.ok(r.pf.spec && r.pf.spec.ready, 'learned the leftover frequency by frequency');
+  assert.ok(10 * Math.log10(rq / pq) > 3, 'removes more of the piano: ' + (10 * Math.log10(rq / pq)).toFixed(1) + ' dB');
+  assert.ok(10 * Math.log10(rs / ps) < 3, 'keeps the voice: ' + (10 * Math.log10(rs / ps)).toFixed(1) + ' dB');
+});
+
 test('a room saved from last time is used at once', () => {
   const st = run(scene({ calib: true, roomSeed: 77 })).pf.exportState();
   const pf = new SF.PianoFilter(sr, {});
@@ -232,4 +274,14 @@ test('a room saved from last time is used at once', () => {
   const r = run(scene({ voiceDb: -6, cents: -10, seed: 5, roomSeed: 77 }), pf);
   assert.ok(r.voiced / r.frames > 0.6, 'hears the voice from the first key: ' + JSON.stringify(r.src));
   assert.ok(!pf.dropped, 'kept it');
+});
+
+test('a saved room is not spoiled by the first chord it hears again', () => {
+  const st = run(scene({ calib: true, roomSeed: 77 })).pf.exportState();
+  assert.ok(st.spec && st.spec.num, 'the leftover picture is saved too');
+  const pf = new SF.PianoFilter(sr, {});
+  pf.importState(st);
+  const r = run(scene({ seed: 5, roomSeed: 77 }), pf);
+  assert.strictEqual(r.voiced, 0, 'nothing heard from the piano alone: ' + JSON.stringify(r.src) + ' ' + JSON.stringify(r.why));
+  assert.ok(pf.cancelDb > 15, 'still cancels ' + pf.cancelDb);
 });

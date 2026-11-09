@@ -341,6 +341,19 @@
       this.h = h;
       return h;
     }
+    /** What was measured, to carry on from next session (the response alone isn't enough: re-solved
+     *  from a few new chords without it, it drifts from what the calibration found). */
+    exportStats() {
+      return this.updates ? { K: this.K, Sr: Float32Array.from(this.Sr), Si: Float32Array.from(this.Si), Srr: Float32Array.from(this.Srr), updates: this.updates } : null;
+    }
+    importStats(st) {
+      if (!st || st.K !== this.K || !st.Sr || st.Sr.length !== this.K) return false;
+      this.Sr.set(st.Sr);
+      this.Si.set(st.Si);
+      this.Srr.set(st.Srr);
+      this.updates = st.updates || 1;
+      return true;
+    }
     reset() {
       this.Sr.fill(0);
       this.Si.fill(0);
@@ -636,23 +649,25 @@
       this.envPeak = Math.max(this.env, this.envPeak * Math.exp(-Math.max(0, dt) / (this.sr * 20)));
       return this.env;
     }
-    /** How much of the piano is left after cancelling, from a frame where nobody sings. */
+    /** How much of the piano is left after cancelling, from a frame where nobody sings
+     *  (false: far more than usual is left, someone sings over it, so it wasn't counted). */
     noteLeftover(rDb) {
       // far more left than usual: someone is singing or talking over it. Skip it (but not
       // forever: a long run of it means the room itself changed)
       const odd = this.fCount >= 30 && rDb > this.fMean + 3 * Math.max(2, Math.sqrt(this.fVar));
       this.fOdd = odd ? (this.fOdd || 0) + 1 : 0;
-      if (odd && this.fOdd <= 120) return;
+      if (odd && this.fOdd <= 120) return false;
       this.fCount++;
       if (this.fCount === 1) {
         this.fMean = rDb;
         this.fVar = 9;
-        return;
+        return true;
       }
       const a = this.fCount < 50 ? 1 / this.fCount : 0.02;
       const d = rDb - this.fMean;
       this.fMean += a * d;
       this.fVar = (1 - a) * (this.fVar + a * d * d);
+      return true;
     }
     /** The key sounding alone through the mic frame ending at end (others released at least
      *  120 ms before it), or null. */
@@ -954,6 +969,8 @@
         tune: Array.from(this.tune),
         tuneN: Array.from(this.tuneN),
         gTune: this.gTune,
+        spec: this.spec ? this.spec.exportState() : null,
+        stats: this.room.exportStats(),
       };
     }
     /** Offer a saved room; it is used if the measured delay matches it (same setup). */
@@ -977,6 +994,7 @@
       const st = this.saved;
       this.room.hc = Float64Array.from(st.hc);
       this.room.solves = 1; // warm start: frequencies not heard again keep what was learned
+      this.statsRestored = this.room.importStats(st.stats);
       const h = new Float32Array(st.hc);
       this.conv.setFilter(h);
       this.solved = true;
@@ -1005,6 +1023,10 @@
         }
         this.gTune = st.gTune || 0;
         this.gTuneN = 20;
+      }
+      if (st.spec && st.spec.num) {
+        this.spec = new LeftoverSpectrum(this.sr, (st.spec.num.length - 1) * 2);
+        this.spec.importState(st.spec);
       }
     }
     /** Delay expected at mic index m: the trend of recent measurements (clock drift), else the last. */
@@ -1087,7 +1109,11 @@
         if (this.room.learn(m, r)) {
           this.learnKeys(end - Lw - this.dUsed, end - this.dUsed);
           this.learnedSec += Lw / 4 / sr;
-          if (!this.solved || end - this.lastSolve >= sr * 1.0) {
+          // A room saved from last time is kept as it is until a few stretches have been heard
+          // again: re-solving it from the first one alone (often the attack of a single chord)
+          // leaves it predicting the piano several dB too quiet for a while.
+          const fresh = !this.restored || this.statsRestored || this.room.updates >= 8;
+          if (!this.solved || (fresh && end - this.lastSolve >= sr * 1.0)) {
             const h = this.room.solve();
             if (h) {
               this.conv.setFilter(h);
@@ -1121,10 +1147,223 @@
       this.trial = null;
       this.lastAcc = -Infinity;
       this.vref = null;
+      this.vsure = null;
+      this.spec = null;
       this.restored = false;
+      this.statsRestored = false;
       this.alignPos = this.n;
       this.done = this.n;
     }
+  }
+
+  // ------------------------------------------------------------ the leftover, frequency by frequency
+  const SPEC_TAU = 0.6; // s: how long the piano's leftover can go on ringing at a frequency
+  const SPEC_FORGET = 1 / 3000; // per quiet frame: the picture follows a room that changes
+  const HARM_DB = 8; // a harmonic of the voice: this far above what the piano usually leaves there
+  const HARM_MAX_HZ = 4000;
+  const HARM_MIN = 5; // harmonics that must stand out to call it the voice
+  const HARM_KEY = 8; // ... and this far above what the same key itself leaves there, when known
+  const HOLD_HARM = 3; // enough to go on believing a voice surely heard a moment before
+  const NH = 16;
+
+  /**
+   * What the room filter leaves of the piano, frequency by frequency. The leftover is much
+   * larger at some frequencies than at others (a room resonance, a note the room colours), but
+   * at each it follows the predicted piano there: learned while nobody sings, as a ratio per
+   * frequency, it says how much piano to expect in each band of a frame. A voice on the very
+   * note the piano plays then still shows: its harmonics stand far above that at several
+   * frequencies, while the piano's own leftover only ever reaches it here and there.
+   * The same picture cleans up what is left, for listening (the lab).
+   */
+  class LeftoverSpectrum {
+    constructor(sr, W) {
+      this.sr = sr;
+      this.W = W;
+      this.bins = W / 2 + 1;
+      this.fft = new SF.FFT(W);
+      this.win = new Float64Array(W);
+      for (let i = 0; i < W; i++) this.win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / W);
+      this.rr = new Float64Array(W);
+      this.ri = new Float64Array(W);
+      this.er = new Float64Array(W);
+      this.ei = new Float64Array(W);
+      this.R = new Float64Array(this.bins); // the leftover now (power)
+      this.E = new Float64Array(this.bins); // the predicted piano, with its ring
+      this.num = new Float64Array(this.bins); // leftover / piano while nobody sings
+      this.den = new Float64Array(this.bins);
+      this.floor = new Float64Array(this.bins).fill(Infinity); // the room's noise
+      // per key and partial: how much more of it is left than the picture above expects (dB),
+      // from frames where the key sounds alone (the calibration plays each key on its own)
+      this.kx = new Float32Array(128 * NH);
+      this.kxN = new Uint16Array(128);
+      this.n = 0;
+      this.end = null;
+      this.postEnd = null;
+    }
+    get ready() {
+      return this.n >= 150;
+    }
+    frame(pf, end) {
+      const W = this.W;
+      const m = pf.mask;
+      const { rr, ri, er, ei, win } = this;
+      for (let i = 0; i < W; i++) {
+        const k = (end - W + i) & m;
+        rr[i] = pf.resR[k] * win[i];
+        er[i] = pf.echoR[k] * win[i];
+      }
+      ri.fill(0);
+      ei.fill(0);
+      this.fft.transform(rr, ri);
+      this.fft.transform(er, ei);
+      const dt = this.end == null ? 0 : end - this.end;
+      const decay = dt > 0 ? Math.exp(-dt / (this.sr * SPEC_TAU)) : 1;
+      const rise = dt > 0 ? Math.pow(1.0002, dt / 512) : 1;
+      const tiny = 1e-14 * W;
+      for (let b = 0; b < this.bins; b++) {
+        const r = rr[b] * rr[b] + ri[b] * ri[b];
+        const e = er[b] * er[b] + ei[b] * ei[b];
+        this.R[b] = r;
+        this.E[b] = Math.max(e, this.E[b] * decay);
+        this.floor[b] = Math.max(tiny, Math.min(r, this.floor[b] * rise));
+      }
+      if (dt > 0 || this.end == null) this.end = end;
+    }
+    /** A frame where nobody sings and the piano plays. */
+    learn() {
+      const a = this.n < 1 / SPEC_FORGET ? 1 / (this.n + 1) : SPEC_FORGET;
+      for (let b = 0; b < this.bins; b++) {
+        this.num[b] += a * (this.R[b] - this.num[b]);
+        this.den[b] += a * (this.E[b] - this.den[b]);
+      }
+      this.n++;
+    }
+    /** How much piano to expect in bin b of this frame (power). */
+    expected(b) {
+      const lo = Math.max(0, b - 1);
+      const hi = Math.min(this.bins - 1, b + 1);
+      let nu = 0;
+      let de = 0;
+      for (let j = lo; j <= hi; j++) {
+        nu += this.num[j];
+        de += this.den[j];
+      }
+      return de > 0 ? (nu / de) * this.E[b] : 0;
+    }
+    /** At harmonic h of f0 (Hz): the leftover now, the piano expected there, the noise floor (power). */
+    at(f0, h) {
+      const c = Math.round((h * f0 * this.W) / this.sr);
+      if (c < 2 || c >= this.bins - 1) return null;
+      let r = 0;
+      let ex = 0;
+      let fl = 0;
+      for (let b = c - 1; b <= c + 1; b++) {
+        r = Math.max(r, this.R[b]);
+        ex = Math.max(ex, this.expected(b));
+        fl = Math.max(fl, this.floor[b]);
+      }
+      return { r, ex, fl };
+    }
+    /** Key p (sounding at pitch midi) is the only one sounding, with nobody singing. */
+    learnKey(p, midi) {
+      if (!this.ready) return;
+      const f0 = 440 * Math.pow(2, (midi - 69) / 12);
+      this.kxN[p] = Math.min(this.kxN[p] + 1, 1000);
+      const a = 1 / Math.min(this.kxN[p], 30);
+      for (let h = 1; h <= NH; h++) {
+        const v = h * f0 <= HARM_MAX_HZ ? this.at(f0, h) : null;
+        if (!v || !(v.ex > 0)) continue;
+        const x = SF.clamp(10 * Math.log10(Math.max(v.r, 1e-30) / v.ex), -20, 40);
+        const i = p * NH + h - 1;
+        this.kx[i] += a * (x - this.kx[i]);
+      }
+    }
+    /**
+     * How many harmonics of the pitch midi (up to 16, below 4 kHz) stand far above the piano's
+     * leftover. keys: the keys sounding, [{p, m}] (m: the pitch it really sounds). Where a
+     * harmonic falls on a partial of one of them, it must also stand well above what that key
+     * itself was found to leave there.
+     */
+    harmonics(midi, keys) {
+      if (!this.ready || midi == null) return 0;
+      const f0 = 440 * Math.pow(2, (midi - 69) / 12);
+      if (f0 < (3 * this.sr) / this.W) return 0; // harmonics closer than the bins can tell apart
+      const k = Math.pow(10, HARM_DB / 10);
+      let n = 0;
+      for (let h = 1; h <= NH && h * f0 <= HARM_MAX_HZ; h++) {
+        const v = this.at(f0, h);
+        if (!v) continue;
+        let need = k * v.ex;
+        for (const key of keys || []) {
+          // the key's partial j on the same frequency (within a third of a semitone)
+          const fk = 440 * Math.pow(2, (key.m - 69) / 12);
+          const j = Math.round((h * f0) / fk);
+          if (j < 1 || j > NH || Math.abs(12 * Math.log2((h * f0) / (j * fk))) > 0.33) continue;
+          const xs = this.kxN[key.p] >= 5 ? this.kx[key.p * NH + j - 1] : 6;
+          need = Math.max(need, v.ex * Math.pow(10, (xs + HARM_KEY) / 10));
+        }
+        if (v.r > need && v.r > 100 * v.fl) n++;
+      }
+      return n;
+    }
+    /** Clean up the frame (take out the piano's expected leftover, times over) and overlap-add it into out. */
+    clean(end, out, mask, over) {
+      const W = this.W;
+      const { rr, ri, win } = this;
+      const on = this.ready;
+      const k = over || 2;
+      for (let b = 0; b < this.bins; b++) {
+        let g = 1;
+        if (on && this.R[b] > 0) g = Math.min(1, Math.max(0.03, 1 - (k * this.expected(b)) / this.R[b]));
+        rr[b] *= g;
+        ri[b] *= g;
+        if (b > 0 && b < W / 2) {
+          rr[W - b] *= g;
+          ri[W - b] *= g;
+        }
+      }
+      this.fft.inverse(rr, ri);
+      const from = this.postEnd == null ? end - W : Math.max(end - W, this.postEnd);
+      for (let i = from; i < end; i++) out[i & mask] = 0;
+      for (let i = 0; i < W; i++) out[(end - W + i) & mask] += (rr[i] * win[i]) / 1.5; // Hann² at a quarter hop sums to 1.5
+      this.postEnd = end;
+    }
+    exportState() {
+      if (!this.ready) return null;
+      return { n: Math.min(this.n, 1 / SPEC_FORGET), num: Float32Array.from(this.num), den: Float32Array.from(this.den), kx: Float32Array.from(this.kx), kxN: Array.from(this.kxN, (x) => Math.min(x, 30)) };
+    }
+    importState(st) {
+      if (!st || !st.num || st.num.length !== this.bins) return;
+      this.num = Float64Array.from(st.num);
+      this.den = Float64Array.from(st.den);
+      this.n = st.n;
+      if (st.kx && st.kx.length === this.kx.length && st.kxN) {
+        this.kx.set(st.kx);
+        for (let p = 0; p < 128; p++) this.kxN[p] = st.kxN[p] || 0;
+      }
+    }
+  }
+
+  /**
+   * The whole of a take cleaned up with what the filter learned by its end (spec): for
+   * listening to what is left of the piano once the room is known. res, echo: what was left
+   * after the room filter, and the predicted piano.
+   */
+  function cleanUp(spec, res, echo, over) {
+    const n = res.length;
+    const P = pow2(n + spec.W);
+    const fake = { resR: new Float32Array(P), echoR: new Float32Array(P), mask: P - 1 };
+    fake.resR.set(res);
+    fake.echoR.set(echo);
+    const sp = new LeftoverSpectrum(spec.sr, spec.W);
+    sp.importState(spec.exportState());
+    const out = new Float32Array(P);
+    const H = spec.W / 4;
+    for (let end = spec.W; end <= n + spec.W; end += H) {
+      sp.frame(fake, end);
+      sp.clean(end, out, P - 1, over);
+    }
+    return out.subarray(0, n);
   }
 
   const RING = 0.5; // seconds a released key still rings into the mic
@@ -1226,7 +1465,14 @@
     const db = (x) => (x > 0 ? 10 * Math.log10(x / W) : -120);
     fr.micDb = db(em);
     fr.echoDb = db(ee);
+    fr.resDb = db(er);
     fr.source = 'mic';
+    let spec = null;
+    if (pf.hasRef) {
+      spec = pf.spec && pf.spec.W === W ? pf.spec : (pf.spec = new LeftoverSpectrum(pf.sr, W));
+      spec.frame(pf, end);
+      if (pf.postR) spec.clean(end, pf.postR, pf.mask);
+    }
     if (!pf.hasRef) {
       noteVoice(pf, fr, er, W, end);
       return fr;
@@ -1253,9 +1499,13 @@
     const rDb = er > 0 && env > 0 ? 10 * Math.log10(er / env) : -120;
     const quiet = pf.quietAt(end - 1) && pf.quietAt(end - W);
     if (quiet && env >= 1e-8 * W && env >= 0.03 * pf.envPeak) {
-      pf.noteLeftover(rDb);
+      const counted = pf.noteLeftover(rDb);
+      if (counted && spec) spec.learn();
       const solo = pf.soloKey(end, W);
-      if (solo != null) pf.noteKeyLeftover(solo, rDb);
+      if (solo != null) {
+        pf.noteKeyLeftover(solo, rDb);
+        if (counted && spec) spec.learnKey(solo, pf.pianoPitch(solo));
+      }
     }
     let mu;
     let sd;
@@ -1295,7 +1545,7 @@
       if (dev >= DEV) {
         if (agree && fr.clarity >= 0.9 && rDb >= muK + 3 && (rDb >= weakDb || !between(low.midi, ps))) {
           fr.why = 'other pitch';
-          noteVoice(pf, fr, er, W, end);
+          noteVoice(pf, fr, er, W, end, true);
           return fr;
         }
         fr.voiced = false;
@@ -1324,12 +1574,25 @@
     if (fr.voiced) {
       if (rDb >= strongDb + extra) {
         fr.why = 'louder than the piano';
-        noteVoice(pf, fr, er, W, end);
+        noteVoice(pf, fr, er, W, end, true);
         return fr;
       }
-      // still the voice heard a moment ago, on the same pitch, a little above the piano
+      // quieter than the piano overall, but its own harmonics stand out from the piano's
+      // leftover at several frequencies: a voice (the piano's leftover only reaches that here
+      // and there)
+      const hn = spec ? spec.harmonics(fr.midi, sounding.map((p) => ({ p, m: pf.pianoPitch(p) }))) : 0;
+      fr.harm = hn;
+      if (hn >= HARM_MIN + (machine ? 2 : 0)) {
+        fr.why = 'its own harmonics';
+        noteVoice(pf, fr, er, W, end, true);
+        return fr;
+      }
+      // still the voice heard a moment ago, on the same pitch: a little above the piano, or
+      // a few of its harmonics still standing out (within a moment of it surely being heard)
       const v = pf.vref;
-      if (v && end - v.end <= 600 && Math.abs(fr.midi - v.midi) <= 0.4 && rDb >= weakDb + extra) {
+      const sure = pf.vsure;
+      const same = (x) => x && Math.abs(fr.midi - x.midi) <= 0.4;
+      if ((v && end - v.end <= 600 && same(v) && rDb >= weakDb + extra) || (sure && end - sure.end <= 0.25 * pf.sr && same(sure) && hn >= HOLD_HARM && !machine)) {
         fr.why = 'holding';
         noteVoice(pf, fr, er, W, end);
         return fr;
@@ -1346,11 +1609,12 @@
     return fr;
   }
   /** Keep a running idea of how loud the singer is at the mic, and where the voice was. */
-  function noteVoice(pf, fr, er, W, end) {
+  function noteVoice(pf, fr, er, W, end, sure) {
     if (!fr.voiced || !(er > 0)) return;
     const d = 10 * Math.log10(er / W);
     pf.voiceDb = pf.voiceDb == null ? d : pf.voiceDb + 0.01 * (d - pf.voiceDb);
     if (end != null) pf.vref = { end, midi: fr.midi };
+    if (end != null && sure) pf.vsure = { end, midi: fr.midi };
   }
 
   SF.DelayTracker = DelayTracker;
@@ -1358,5 +1622,7 @@
   SF.Convolver = Convolver;
   SF.PianoFilter = PianoFilter;
   SF.analyzeFrame = analyzeFrame;
+  SF.LeftoverSpectrum = LeftoverSpectrum;
+  SF.cleanUp = cleanUp;
   SF.pcDist = pcDist;
 });

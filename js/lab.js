@@ -3,8 +3,10 @@
  * The piano plays the app's calibration while you stay quiet, then a short exercise (three
  * keys of "chord, five notes, chord") to sing along to. Both inputs are recorded the whole
  * time; afterwards the same filter code the app uses runs over the recording here, from
- * nothing learned, and gives back four things to listen to: the mic, the piano's own audio,
- * the piano as the filter predicts the mic hears it, and the mic with that removed.
+ * nothing learned, and gives back the pitch it heard against the notes to sing, and things to
+ * listen to: the mic, the piano's own audio, the piano as the filter predicts the mic hears it,
+ * the mic with that removed, and that cleaned up further with what the filter learned of the
+ * piano's leftover frequency by frequency.
  */
 (function (root) {
   'use strict';
@@ -283,7 +285,10 @@
       }
     }
     for (; done < n; done++) res[done] = mic[done];
-    return { meta, mic, ref, echo, res, frames, sr, tOf, f0, pf, delayAt };
+    onProgress(1);
+    await new Promise((r) => setTimeout(r, 0));
+    const post = pf.spec && pf.spec.ready ? SF.cleanUp(pf.spec, res, echo, 4) : res;
+    return { meta, mic, ref, side: d.side || null, echo, res, post, frames, sr, tOf, f0, pf, delayAt };
   }
 
   // ---------------------------------------------------------------- results
@@ -296,41 +301,125 @@
     // exercise's chords, once the filter was working
     let em = 0;
     let er = 0;
+    let ep = 0;
+    const post = tk.post;
     const blocks = meta.blocks;
     // (once it has had the chance to learn: from the calibration's single keys on)
     const from = tk.delayAt == null ? Infinity : Math.max(idx(tk.delayAt + 2000), idx(lab.t0 + 0.6 * lab.calDur));
     for (let i = 0; i < blocks.length; i++) {
       if (!blocks[i][3]) continue;
-      for (let k = i * 512; k < i * 512 + 512; k++) {
+      for (let k = i * 512; k < i * 512 + 512 && k < mic.length; k++) {
         if (k < from) continue;
         em += mic[k] * mic[k];
         er += res[k] * res[k];
+        ep += post[k] * post[k];
       }
     }
     const cal = dbr(em, er);
+    const calPost = post !== res ? dbr(em, ep) : null;
     // the sung notes: how many it could hear (not counting each note's first and last 120 ms)
     let all = 0;
     let heard = 0;
     let unsure = 0;
+    const vDb = [];
+    const pDb = [];
     for (const fr of tk.frames) {
       const s = lab.spans.find((x) => fr.t >= x[0] + 120 && fr.t < x[1] - 120);
       if (!s) continue;
       all++;
-      if (fr.voiced) heard++;
-      else if (fr.source === 'learning' || fr.source === 'unsure') unsure++;
+      if (fr.echoDb > -100) pDb.push(fr.echoDb);
+      if (fr.voiced) {
+        heard++;
+        if (fr.resDb != null) vDb.push(fr.resDb);
+      } else if (fr.source === 'learning' || fr.source === 'unsure') unsure++;
     }
+    // how loud the voice was at the mic against the piano playing the same notes
+    const median = (a) => (a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1] : null);
+    const vs = vDb.length >= 10 && pDb.length >= 10 ? median(vDb) - median(pDb) : null;
     $('nDelay').textContent = pf.delay == null ? 'not found' : ((pf.delay / sr) * 1000).toFixed(1) + ' ms';
     $('nCal').textContent = cal == null ? '–' : cal.toFixed(1) + ' dB';
+    $('nCalNote').textContent = 'Piano removed while you were quiet' + (calPost != null ? ' (' + calPost.toFixed(1) + ' dB after the clean-up, in “What’s left”)' : '');
     $('nSing').textContent = all ? Math.round((100 * heard) / all) + '%' : '–';
+    const vr = vs == null ? null : Math.round(vs);
+    $('nVoice').textContent = vr == null ? '–' : (vr > 0 ? '+' : vr < 0 ? '−' : '') + Math.abs(vr) + ' dB';
     let v;
     if (pf.delay == null) v = 'It never found the delay between the piano’s audio and the mic, so it couldn’t remove anything. Is the piano loud enough to hear in the room?';
     else if (cal != null && cal < 6) v = 'It removed very little of the piano. Listen to “What’s left”: if the piano is nearly as loud as in “The mic”, the mic may still be changing its own sound, or the setup changed during the test.';
     else if (all && heard / all < 0.6) v = 'It removed the piano, but heard only part of your singing. “What’s left” shows whether your voice is clear there.';
     else v = 'It removed the piano and heard most of your singing. “What’s left” should sound like your voice alone.';
     const share = (k) => Math.round((100 * k) / Math.max(1, all)) + '%';
-    $('verdict').textContent = v + (all && heard < all ? ' In your sung notes it heard you ' + share(heard) + ' of the time, couldn’t tell you from the piano ' + share(unsure) + ', and heard no singing ' + share(all - heard - unsure) + '.' : '');
+    v += all && heard < all ? ' In your sung notes it heard you ' + share(heard) + ' of the time, couldn’t tell you from the piano ' + share(unsure) + ', and heard no singing ' + share(all - heard - unsure) + '.' : '';
+    if (vs != null && vs < -3 && lab.guide && heard < 0.9 * all)
+      v += ' At the mic, the piano playing your notes was about ' + Math.round(-vs) + ' dB louder than your voice: where it is that much louder, it can’t always tell you apart. A lower “Your notes touch” helps.';
+    $('verdict').textContent = v;
     $('results').hidden = false;
+    drawPitch(tk);
     drawChart(tk);
+  }
+  /** The notes to sing, and the pitch heard: as the voice (by how close), or read but not trusted. */
+  function drawPitch(tk) {
+    const c = $('pitchChart');
+    const g = c.getContext('2d');
+    const w = c.width;
+    const h = c.height;
+    g.clearRect(0, 0, w, h);
+    const lab = tk.meta.lab;
+    const t0 = lab.te - 300;
+    const t1 = lab.spans.length ? lab.spans[lab.spans.length - 1][1] + 500 : lab.tEnd;
+    const ps = lab.spans.map((s) => s[2]);
+    const lo = Math.min(...ps) - 3.5;
+    const hi = Math.max(...ps) + 3.5;
+    const left = 70;
+    const x = (t) => left + ((t - t0) / (t1 - t0)) * (w - left - 10);
+    const y = (m) => h - 8 - ((SF.clamp(m, lo, hi) - lo) / (hi - lo)) * (h - 16);
+    // a line per semitone, named
+    g.font = '20px ' + getComputedStyle(document.body).fontFamily;
+    g.textBaseline = 'middle';
+    for (let m = Math.ceil(lo); m <= hi; m++) {
+      g.strokeStyle = m % 12 === 0 ? '#2f4466' : '#1d2b45';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(left, y(m));
+      g.lineTo(w - 10, y(m));
+      g.stroke();
+      g.fillStyle = '#93a1b8';
+      g.fillText(SF.noteName(m), 10, y(m));
+    }
+    // the notes to sing
+    const rowH = (h - 16) / (hi - lo);
+    g.fillStyle = '#2c4a73';
+    for (const [a, b, p] of lab.spans) {
+      const r = Math.min(6, rowH * 0.35);
+      const xa = x(a);
+      const xb = x(b) - 3;
+      const ya = y(p) - rowH * 0.35;
+      if (g.roundRect) {
+        g.beginPath();
+        g.roundRect(xa, ya, xb - xa, rowH * 0.7, r);
+        g.fill();
+      } else g.fillRect(xa, ya, xb - xa, rowH * 0.7);
+    }
+    // what it heard
+    const tol = 0.35;
+    for (const fr of tk.frames) {
+      const s = lab.spans.find((q) => fr.t >= q[0] && fr.t < q[1]);
+      if (!s) continue; // between the notes
+      const m = fr.voiced ? fr.midi : fr.raw;
+      if (m == null || m < lo || m > hi) continue;
+      if (fr.voiced && fr.midi != null) {
+        const d = Math.abs(fr.midi - s[2]);
+        g.fillStyle = d <= tol ? '#5bd69b' : d <= 2 * tol ? '#f2c14e' : '#f07a6a';
+        g.beginPath();
+        g.arc(x(fr.t), y(fr.midi), 4.5, 0, 2 * Math.PI);
+        g.fill();
+      } else if (fr.source === 'unsure' && fr.raw != null) {
+        g.strokeStyle = '#93a1b8';
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.arc(x(fr.t), y(fr.raw), 3.5, 0, 2 * Math.PI);
+        g.stroke();
+      }
+    }
   }
   function drawChart(tk) {
     const c = $('chart');
@@ -415,7 +504,7 @@
   // ---------------------------------------------------------------- saving
   $('saveBtn').onclick = () => {
     if (!take) return;
-    const blob = SF.wavWithData(take.mic, take.ref, take.sr, take.meta);
+    const blob = SF.wavWithData(take.mic, take.ref, take.sr, take.meta, take.side);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'scales-feedback-lab-' + new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-') + '.wav';
@@ -423,6 +512,40 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  };
+
+  // ---------------------------------------------------------------- opening a saved recording
+  /** Runs a recording saved earlier through the filter as it is now (after an update, say). */
+  async function openRecording(file) {
+    if (running) return;
+    const st = $('openStatus');
+    st.className = 'status';
+    st.textContent = 'Reading ' + file.name + '…';
+    try {
+      const w = SF.readWavData(await file.arrayBuffer());
+      if (!w.meta.lab) throw new Error('this recording was saved by the app, not the lab: open it there');
+      running = true;
+      updateReady();
+      $('results').hidden = true;
+      $('progBox').hidden = false;
+      take = await processTake({ mic: w.mic, ref: w.ref, side: w.side, meta: w.meta }, (f) => ($('prog').style.width = f * 100 + '%'));
+      $('progBox').hidden = true;
+      showResults(take);
+      st.textContent = 'Showing ' + file.name + ', from ' + new Date(w.meta.lab.at).toLocaleString() + ', run through the filter as it is now.';
+      st.className = 'status ok';
+    } catch (e) {
+      $('progBox').hidden = true;
+      st.textContent = 'Couldn’t open it: ' + (e && e.message ? e.message : e) + '.';
+      st.className = 'status bad';
+    }
+    running = false;
+    updateReady();
+  }
+  $('openBtn').onclick = () => $('openFile').click();
+  $('openFile').onchange = () => {
+    const f = $('openFile').files[0];
+    $('openFile').value = '';
+    if (f) openRecording(f);
   };
 
   // reconnect at once if the browser already allows the mic (it remembers on this site)
@@ -439,5 +562,5 @@
     $('runStatus').className = 'status bad';
   });
   updateReady();
-  root.SFLab = { listener, processTake, get take() { return take; } };
+  root.SFLab = { listener, processTake, openRecording, get take() { return take; } };
 })(window);

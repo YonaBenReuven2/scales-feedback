@@ -153,7 +153,7 @@
       }
       const quiet = this.expectQuiet((t0 + t1) / 2);
       pf.push(a, this.hasRef ? b : null, quiet, onset, events);
-      this.rec.push({ f, a, b, perf: m.perf, ctx: m.ctx, q: quiet ? 1 : 0 });
+      this.rec.push({ f, a, b, s: m.s || null, perf: m.perf, ctx: m.ctx, q: quiet ? 1 : 0 });
       while (this.rec.length && f - this.rec[0].f > this.recordSec * this.sr) this.rec.shift();
       // levels for the meters
       let sm = 0;
@@ -217,11 +217,13 @@
       const n = rec.reduce((k, r) => k + r.a.length, 0);
       const mic = new Float32Array(n);
       const ref = new Float32Array(n);
+      const side = rec.some((r) => r.s) ? new Float32Array(n) : null;
       let k = 0;
       const blocks = [];
       for (const r of rec) {
         mic.set(r.a, k);
         if (r.b) ref.set(r.b, k);
+        if (side && r.s) side.set(r.s, k);
         blocks.push([r.f, Math.round(r.perf * 10) / 10, Math.round(r.ctx * 1e6) / 1e6, r.q]);
         k += r.a.length;
       }
@@ -262,7 +264,13 @@
         filter: st,
       };
       if (meta.filter && meta.filter.room && meta.filter.room.hc) meta.filter.room.hc = Array.from(meta.filter.room.hc);
-      this.post({ type: 'dump', mic, ref, meta }, [mic.buffer, ref.buffer]);
+      if (meta.filter && meta.filter.room) {
+        // big, and the recording rebuilds them
+        delete meta.filter.room.spec;
+        delete meta.filter.room.stats;
+      }
+      if (side) meta.side = true;
+      this.post({ type: 'dump', mic, ref, side, meta }, side ? [mic.buffer, ref.buffer, side.buffer] : [mic.buffer, ref.buffer]);
     }
     sendRoom() {
       const st = this.pf && this.pf.solved ? this.pf.exportState() : null;

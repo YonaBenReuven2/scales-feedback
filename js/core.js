@@ -78,11 +78,15 @@
 
   /** A two-channel 32-bit float WAV (a left, b right), with data (JSON) in an extra "sfjs"
    *  chunk that players ignore. */
-  SF.wavWithData = (a, b, sr, data) => {
+  /** A float WAV of the mic (left), the piano's audio (right) and, when given, the piano's
+   *  side (a third channel), with data as JSON in an 'sfjs' chunk. */
+  SF.wavWithData = (a, b, sr, data, c) => {
     const n = a.length;
+    const chs = c ? [a, b, c] : [a, b];
+    const nc = chs.length;
     const json = new TextEncoder().encode(JSON.stringify(data));
     const jl = json.length + (json.length & 1);
-    const dl = n * 8;
+    const dl = n * 4 * nc;
     const buf = new ArrayBuffer(12 + 26 + 8 + dl + 8 + jl);
     const v = new DataView(buf);
     let o = 0;
@@ -103,23 +107,51 @@
     tag('fmt ');
     u32(18);
     u16(3); // IEEE float
-    u16(2);
+    u16(nc);
     u32(sr);
-    u32(sr * 8);
-    u16(8);
+    u32(sr * 4 * nc);
+    u16(4 * nc);
     u16(32);
     u16(0);
     tag('data');
     u32(dl);
     for (let i = 0; i < n; i++) {
-      v.setFloat32(o, a[i], true);
-      v.setFloat32(o + 4, b ? b[i] : 0, true);
-      o += 8;
+      for (const ch of chs) {
+        v.setFloat32(o, ch ? ch[i] : 0, true);
+        o += 4;
+      }
     }
     tag('sfjs');
     u32(json.length);
     new Uint8Array(buf, o, json.length).set(json);
     return new Blob([buf], { type: 'audio/wav' });
+  };
+  /** Reads a file written by wavWithData: {sr, mic, ref, side (or null), meta}. */
+  SF.readWavData = (ab) => {
+    const v = new DataView(ab);
+    const str = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+    if (ab.byteLength < 12 || str(0) !== 'RIFF' || str(8) !== 'WAVE') throw new Error('not a WAV file');
+    let o = 12;
+    let fmt = null;
+    let out = null;
+    let meta = null;
+    while (o + 8 <= ab.byteLength) {
+      const id = str(o);
+      const len = v.getUint32(o + 4, true);
+      const body = o + 8;
+      if (id === 'fmt ') fmt = { format: v.getUint16(body, true), nc: v.getUint16(body + 2, true), sr: v.getUint32(body + 4, true), bits: v.getUint16(body + 14, true) };
+      else if (id === 'data' && fmt) {
+        if (fmt.format !== 3 || fmt.bits !== 32 || fmt.nc < 2) throw new Error('not a recording saved by this app');
+        const n = Math.floor(len / (4 * fmt.nc));
+        const chs = [];
+        for (let c = 0; c < fmt.nc; c++) chs.push(new Float32Array(n));
+        for (let i = 0; i < n; i++) for (let c = 0; c < fmt.nc; c++) chs[c][i] = v.getFloat32(body + 4 * (i * fmt.nc + c), true);
+        out = { mic: chs[0], ref: chs[1], side: chs[2] || null };
+      } else if (id === 'sfjs') meta = JSON.parse(new TextDecoder().decode(new Uint8Array(ab, body, len)));
+      o = body + len + (len & 1);
+    }
+    if (!out || !meta || !meta.blocks) throw new Error('not a recording saved by this app');
+    return { sr: fmt.sr, mic: out.mic, ref: out.ref, side: out.side, meta };
   };
   SF.median = (arr) => {
     if (!arr.length) return NaN;

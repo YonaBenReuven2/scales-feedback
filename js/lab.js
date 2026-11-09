@@ -71,12 +71,21 @@
     await fillDevices();
     updateReady();
   }
+  /** What is still missing before a test can run ('' when nothing). */
+  function missing() {
+    if (typeof SF.calibrationNotes !== 'function' || typeof listener.dump !== 'function')
+      return 'The browser is still using an older copy of the app. Reload this page with Ctrl+Shift+R.';
+    if (!listener.running) return 'The microphone isn’t open: press Connect.';
+    if (!listener.refStream) return 'The piano’s USB audio isn’t open: pick it in the list above (it shows as Line (P-Series)).';
+    if (!out) return 'The piano isn’t connected over MIDI: is the USB cable in and the piano on? Then press Connect.';
+    return '';
+  }
   function updateReady() {
-    const ok = listener.running && listener.refStream && out;
-    $('runBtn').disabled = !ok || running;
-    if (ok) setDev('Ready: ' + listener.micLabel + ', and ' + listener.refLabel + '.', 'ok');
-    else if (listener.running && !listener.refStream) setDev('The piano’s USB audio isn’t open: pick it in the list.', 'bad');
-    else if (listener.running && !out) setDev('The piano isn’t connected over MIDI.', 'bad');
+    // the button always answers: when something is missing it says what
+    $('runBtn').disabled = running;
+    const m = missing();
+    if (!m) setDev('Ready: ' + listener.micLabel + ', and ' + listener.refLabel + '.', 'ok');
+    else if (listener.running || /older copy/.test(m)) setDev(m, 'bad');
   }
   $('connectBtn').onclick = connect;
   $('micSel').onchange = async () => {
@@ -130,9 +139,37 @@
   const sleepUntil = (ms) => new Promise((res) => setTimeout(res, Math.max(0, ms - SF.now())));
   async function runTest() {
     if (running) return;
+    let m = missing();
+    if (m && !/older copy/.test(m)) {
+      // try connecting first (this click lets the browser start the sound)
+      $('runStatus').textContent = 'Connecting…';
+      await connect();
+      m = missing();
+    }
+    if (m) {
+      $('runStatus').textContent = m;
+      $('runStatus').className = 'status bad';
+      return;
+    }
+    $('runStatus').className = 'status';
+    try {
+      await runTestNow();
+    } catch (e) {
+      $('runStatus').textContent = 'The test stopped: ' + (e && e.message ? e.message : e) + '. Reload the page and try again; if it happens again, tell me what it says.';
+      $('runStatus').className = 'status bad';
+      $('phase').hidden = true;
+      $('progBox').hidden = true;
+      plan = { mode: 'stopped' };
+      listener.sendPlan();
+      if (out) out.allOff();
+    }
+    running = false;
+    updateReady();
+  }
+  async function runTestNow() {
     const lo = SF.parseNote($('loNote').value);
     const hi = SF.parseNote($('hiNote').value);
-    if (!isFinite(lo) || !isFinite(hi) || hi - lo < 12) return ($('runStatus').textContent = 'Write the notes like E2 and A4, at least an octave apart.');
+    if (!isFinite(lo) || !isFinite(hi) || hi - lo < 12) throw new Error('write the notes like E2 and A4, at least an octave apart');
     running = true;
     updateReady();
     $('results').hidden = true;
@@ -183,21 +220,12 @@
     listener.sendPlan();
     $('phase').textContent = 'Working it out…';
     let d;
-    try {
-      d = await listener.dump();
-    } catch (e) {
-      $('runStatus').textContent = 'Could not get the recording: ' + e.message;
-      running = false;
-      updateReady();
-      return;
-    }
+    d = await listener.dump();
     d.meta.lab = { lo, hi, velAcc, velSing, guide: $('guideOn').checked, t0, te, tEnd, calDur: cal.dur, spans: ex.spans.map((s) => [te + s[0], te + s[1], s[2]]), at: new Date().toISOString(), mic: listener.micLabel, piano: listener.refLabel };
     take = await processTake(d, (f) => ($('prog').style.width = f * 100 + '%'));
     $('phase').hidden = true;
     $('progBox').hidden = true;
     showResults(take);
-    running = false;
-    updateReady();
   }
   $('runBtn').onclick = runTest;
 
@@ -406,5 +434,10 @@
       /* press Connect */
     }
   })();
+  root.addEventListener('error', (e) => {
+    $('runStatus').textContent = 'Something went wrong: ' + (e.message || e) + '. Reload the page (Ctrl+Shift+R) and try again.';
+    $('runStatus').className = 'status bad';
+  });
+  updateReady();
   root.SFLab = { listener, processTake, get take() { return take; } };
 })(window);

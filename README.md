@@ -126,6 +126,8 @@ It shares the `yonabenreuven2.github.io` origin with the other pages there, incl
 - reads what to keep from `index.html` and `lab.html` themselves, so it never needs editing when files are added or renamed;
 - only touches caches named `scalesfeedback-…`, never the ear trainer's or the practice log's (cache storage is shared by the whole github.io site).
 
+The manifest's `id` is `/scales-feedback/`. Chrome reads an `id` of `./` as the whole site, not the app's folder. The practice log's manifest has `./`, so the same here made Chrome take this app for the already installed practice log and open that instead.
+
 The `?v=` numbers on the scripts are still bumped when they change, for a page opened without the service worker.
 
 ## Tests

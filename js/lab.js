@@ -118,13 +118,35 @@
     $('refLvl').style.width = listener.refStream ? pct(lv.ref) : '0%';
   });
   for (const id of ['velAcc', 'velSing']) $(id).oninput = () => ($(id + 'V').textContent = $(id).value);
+  // the test's settings, remembered in this browser
+  const FIELDS = ['loNote', 'hiNote', 'fromNote', 'velAcc', 'velSing', 'guideOn'];
+  function saveFields() {
+    try {
+      const o = {};
+      for (const id of FIELDS) o[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value;
+      localStorage.setItem('sf-lab', JSON.stringify(o));
+    } catch (e) {
+      /* not kept */
+    }
+  }
+  try {
+    const o = JSON.parse(localStorage.getItem('sf-lab') || 'null');
+    if (o)
+      for (const id of FIELDS) {
+        if (o[id] == null) continue;
+        if ($(id).type === 'checkbox') $(id).checked = !!o[id];
+        else $(id).value = o[id];
+        if ($(id + 'V')) $(id + 'V').textContent = $(id).value;
+      }
+  } catch (e) {
+    /* defaults */
+  }
 
   // ---------------------------------------------------------------- the test
-  /** Three keys of "chord, five sung notes (do re mi re do), chord", going down. */
-  function exercise(lo, hi, guide, velAcc, velSing) {
+  /** Three keys of "chord, five sung notes (do re mi re do), chord", going down from top. */
+  function exercise(top, guide, velAcc, velSing) {
     const notes = [];
     const spans = [];
-    const top = Math.max(lo + 4, Math.min(hi - 4, Math.round((lo + hi) / 2) - 2));
     let t = 0;
     for (const root of [top, top - 1, top - 2]) {
       for (const d of [0, 4, 7]) notes.push({ p: root + d, vel: velAcc, t, d: 1200 });
@@ -169,9 +191,16 @@
     updateReady();
   }
   async function runTestNow() {
-    const lo = SF.parseNote($('loNote').value);
-    const hi = SF.parseNote($('hiNote').value);
+    let lo = SF.parseNote($('loNote').value);
+    let hi = SF.parseNote($('hiNote').value);
     if (!isFinite(lo) || !isFinite(hi) || hi - lo < 12) throw new Error('write the notes like E2 and A4, at least an octave apart');
+    const from = $('fromNote').value.trim() ? SF.parseNote($('fromNote').value) : NaN;
+    if ($('fromNote').value.trim() && !(from >= 28 && from <= 90)) throw new Error('write the note to sing from like E3');
+    const top = isFinite(from) ? from : Math.max(lo + 4, Math.min(hi - 4, Math.round((lo + hi) / 2) - 2));
+    // the calibration covers every key the exercise plays
+    lo = Math.min(lo, top - 2);
+    hi = Math.max(hi, top + 7);
+    saveFields();
     running = true;
     updateReady();
     $('results').hidden = true;
@@ -184,7 +213,7 @@
     listener.savedRoom = null;
     listener.startEngine();
     const cal = SF.calibrationNotes(lo, hi, velAcc, velSing);
-    const ex = exercise(lo, hi, $('guideOn').checked, velAcc, velSing);
+    const ex = exercise(top, $('guideOn').checked, velAcc, velSing);
     const t0 = SF.now() + 1000;
     const te = t0 + cal.dur + 1500;
     const tEnd = te + ex.dur + 800;
@@ -223,7 +252,7 @@
     $('phase').textContent = 'Working it out…';
     let d;
     d = await listener.dump();
-    d.meta.lab = { lo, hi, velAcc, velSing, guide: $('guideOn').checked, t0, te, tEnd, calDur: cal.dur, spans: ex.spans.map((s) => [te + s[0], te + s[1], s[2]]), at: new Date().toISOString(), mic: listener.micLabel, piano: listener.refLabel };
+    d.meta.lab = { lo, hi, from: top, velAcc, velSing, guide: $('guideOn').checked, t0, te, tEnd, calDur: cal.dur, spans: ex.spans.map((s) => [te + s[0], te + s[1], s[2]]), at: new Date().toISOString(), mic: listener.micLabel, piano: listener.refLabel };
     take = await processTake(d, (f) => ($('prog').style.width = f * 100 + '%'));
     $('phase').hidden = true;
     $('progBox').hidden = true;
@@ -254,6 +283,10 @@
     let delayAt = null;
     const keys = meta.keys.slice().sort((a, b) => a.t - b.t);
     let ki = 0;
+    // the calibration's stretches (recordings from before they were marked as such in the blocks)
+    const calib = [];
+    const plans = meta.plans || [];
+    for (let j = 0; j < plans.length; j++) if (plans[j][1] && plans[j][1].mode === 'calib') calib.push([plans[j][0], j + 1 < plans.length ? plans[j + 1][0] : Infinity]);
     for (let i = 0; i < blocks.length; i++) {
       const f = blocks[i][0];
       const a = mic.subarray(i * B, i * B + B);
@@ -268,7 +301,9 @@
         if (k.on) onset = true;
         (events = events || []).push(k);
       }
-      pf.push(a, b, blocks[i][3] === 1, onset, events);
+      let q = blocks[i][3];
+      if (q === 1 && calib.some(([x, y]) => t0 >= x && t1 <= y)) q = 2;
+      pf.push(a, b, q, onset, events);
       if (delayAt == null && pf.delay != null) delayAt = tOf(f);
       for (; done < pf.done; done++) {
         echo[done] = pf.echoR[done & pf.mask];

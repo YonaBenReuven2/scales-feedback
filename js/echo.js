@@ -522,7 +522,11 @@
       return m;
     }
     quietAt(i) {
-      return i >= 0 && this.quietR[Math.floor(i / this.B) & (this.quietR.length - 1)] === 1;
+      return i >= 0 && this.quietR[Math.floor(i / this.B) & (this.quietR.length - 1)] >= 1;
+    }
+    /** In the calibration: nobody sings for sure. */
+    sureQuietAt(i) {
+      return i >= 0 && this.quietR[Math.floor(i / this.B) & (this.quietR.length - 1)] === 2;
     }
     copy(ring, end, out) {
       const len = out.length;
@@ -535,7 +539,8 @@
       const f = pos - i;
       return this.refR[i & this.mask] * (1 - f) + this.refR[(i + 1) & this.mask] * f;
     }
-    /** onset: a note-on was sent to the piano during this block.
+    /** quiet: nobody should be singing (2: the calibration, nobody sings for sure).
+     *  onset: a note-on was sent to the piano during this block.
      *  events: the keys pressed ({p, on: true}) and released ({p, on: false}) in it. */
     push(mic, ref, quiet, onset, events) {
       const len = mic.length;
@@ -554,7 +559,7 @@
         e /= len;
       }
       for (let s = Math.floor(this.n / this.B); s <= Math.floor((this.n + len - 1) / this.B); s++) {
-        this.quietR[s & q] = quiet ? 1 : 0;
+        this.quietR[s & q] = quiet === 2 ? 2 : quiet ? 1 : 0;
         this.refE[s & q] = e;
       }
       this.n += len;
@@ -611,6 +616,13 @@
       for (const k of this.keys) if (k.i0 <= e1 && k.i1 >= e0 && out.indexOf(k.p) < 0) out.push(k.p);
       return out;
     }
+    /** Samples from the latest key pressed to the end of the mic frame ending at end (Infinity: none). */
+    sinceOnset(end) {
+      const e1 = end - (this.dUsed || 0);
+      let best = Infinity;
+      for (const k of this.keys) if (k.i0 <= e1 && e1 - k.i0 < best) best = e1 - k.i0;
+      return best;
+    }
     /** The pitch the piano really sounds for key p (MIDI, fractional). */
     pianoPitch(p) {
       return p + (this.tuneN[p] ? this.tune[p] : this.gTune) / 100;
@@ -651,10 +663,11 @@
     }
     /** How much of the piano is left after cancelling, from a frame where nobody sings
      *  (false: far more than usual is left, someone sings over it, so it wasn't counted). */
-    noteLeftover(rDb) {
+    noteLeftover(rDb, sure) {
       // far more left than usual: someone is singing or talking over it. Skip it (but not
-      // forever: a long run of it means the room itself changed)
-      const odd = this.fCount >= 30 && rDb > this.fMean + 3 * Math.max(2, Math.sqrt(this.fVar));
+      // forever: a long run of it means the room itself changed). In the calibration nobody
+      // sings: there it is a key the room leaves more of, and it counts.
+      const odd = !sure && this.fCount >= 30 && rDb > this.fMean + 3 * Math.max(2, Math.sqrt(this.fVar));
       this.fOdd = odd ? (this.fOdd || 0) + 1 : 0;
       if (odd && this.fOdd <= 120) return false;
       this.fCount++;
@@ -685,10 +698,10 @@
     }
     /** Per key, kept as how much more (or less) is left of it than of the room as a whole
      *  at the time: the room changes (people move, the lid, the volume), its keys with it. */
-    noteKeyLeftover(p, rDb) {
+    noteKeyLeftover(p, rDb, sure) {
       if (this.fCount < 10) return;
       const off = rDb - this.fMean;
-      if (off > 3 * Math.max(3, Math.sqrt(this.fVar)) + 9) return; // a voice over it
+      if (!sure && off > 3 * Math.max(3, Math.sqrt(this.fVar)) + 9) return; // a voice over it
       this.kN[p] = Math.min(this.kN[p] + 1, 1000);
       this.kMean[p] += (off - this.kMean[p]) / Math.min(this.kN[p], 20);
     }
@@ -1164,7 +1177,12 @@
   const HARM_MIN = 5; // harmonics that must stand out to call it the voice
   const HARM_KEY = 8; // ... and this far above what the same key itself leaves there, when known
   const HOLD_HARM = 3; // enough to go on believing a voice surely heard a moment before
-  const NH = 16;
+  // the pitch reading must be clean when it is an octave (or more) from the key sounding on its
+  // note (the leftover of a low key, its fundamental weak at a laptop mic, reads an octave up),
+  // and in a key's attack, which the room filter predicts least well
+  const HARM_CLARITY = 0.9;
+  const ATTACK = 0.1; // s
+  const NH = 32; // harmonics looked at (below HARM_MAX_HZ): a low voice has many below 4 kHz
 
   /**
    * What the room filter leaves of the piano, frequency by frequency. The leftover is much
@@ -1279,7 +1297,7 @@
       }
     }
     /**
-     * How many harmonics of the pitch midi (up to 16, below 4 kHz) stand far above the piano's
+     * How many harmonics of the pitch midi (up to NH, below 4 kHz) stand far above the piano's
      * leftover. keys: the keys sounding, [{p, m}] (m: the pitch it really sounds). Where a
      * harmonic falls on a partial of one of them, it must also stand well above what that key
      * itself was found to leave there.
@@ -1299,7 +1317,7 @@
           const fk = 440 * Math.pow(2, (key.m - 69) / 12);
           const j = Math.round((h * f0) / fk);
           if (j < 1 || j > NH || Math.abs(12 * Math.log2((h * f0) / (j * fk))) > 0.33) continue;
-          const xs = this.kxN[key.p] >= 5 ? this.kx[key.p * NH + j - 1] : 6;
+          const xs = this.kxN[key.p] >= 5 ? this.kx[key.p * NH + j - 1] : 14; // not measured on its own: be wary
           need = Math.max(need, v.ex * Math.pow(10, (xs + HARM_KEY) / 10));
         }
         if (v.r > need && v.r > 100 * v.fl) n++;
@@ -1487,6 +1505,18 @@
       return fr;
     }
     if (pf.ready) fr.source = 'filtered';
+    const quiet = pf.quietAt(end - 1) && pf.quietAt(end - W);
+    const sure = quiet && pf.sureQuietAt(end - 1) && pf.sureQuietAt(end - W);
+    // the piano clearly above the room's noise (in the calibration also its quietest keys, which
+    // the mic may hear 15 dB under its loudest)
+    const playing = env >= 1e-8 * W && env >= (sure ? 0.003 : 0.03) * pf.envPeak;
+    // the calibration: nobody sings, so every frame of it teaches what the room leaves, frequency
+    // by frequency and key by key (from its start, before every key is known)
+    if (spec && pf.ready && !pf.offBy && sure && playing) {
+      spec.learn();
+      const solo = pf.soloKey(end, W);
+      if (solo != null) spec.learnKey(solo, pf.pianoPitch(solo));
+    }
     if (!pf.ready || pf.unlearnedAt(end, W) || pf.offBy >= 2) {
       // keys the room hasn't been learned for (or the alignment is in doubt): the piano could
       // be singing any of it. Calibrating teaches every key.
@@ -1497,14 +1527,13 @@
     }
     // what is left, against the usual leftover of the piano heard just now (dB)
     const rDb = er > 0 && env > 0 ? 10 * Math.log10(er / env) : -120;
-    const quiet = pf.quietAt(end - 1) && pf.quietAt(end - W);
-    if (quiet && env >= 1e-8 * W && env >= 0.03 * pf.envPeak) {
-      const counted = pf.noteLeftover(rDb);
-      if (counted && spec) spec.learn();
+    if (quiet && playing) {
+      const counted = pf.noteLeftover(rDb, sure);
+      if (counted && spec && !sure) spec.learn();
       const solo = pf.soloKey(end, W);
       if (solo != null) {
-        pf.noteKeyLeftover(solo, rDb);
-        if (counted && spec) spec.learnKey(solo, pf.pianoPitch(solo));
+        pf.noteKeyLeftover(solo, rDb, sure);
+        if (counted && spec && !sure) spec.learnKey(solo, pf.pianoPitch(solo));
       }
     }
     let mu;
@@ -1527,7 +1556,9 @@
       if (m > muK) muK = m;
     }
     if (muK === -Infinity) muK = mu + (pf.leastLearned(end, W) < 8 ? 3 : 0);
-    const strongDb = muK + SF.clamp(3 * sd, 8, 12);
+    // (loudness alone is a blunt test: some keys leave 10 dB more in a held note than the
+    // calibration measured, low ones above all; the harmonics below do the finer work)
+    const strongDb = muK + SF.clamp(3 * sd, 12, 14);
     const weakDb = muK + SF.clamp(2 * sd, 4, 8);
     fr.presence = Math.pow(10, (rDb - muK) / 10);
     if (fr.voiced && sounding.length) {
@@ -1580,7 +1611,10 @@
       // quieter than the piano overall, but its own harmonics stand out from the piano's
       // leftover at several frequencies: a voice (the piano's leftover only reaches that here
       // and there)
-      const hn = spec ? spec.harmonics(fr.midi, sounding.map((p) => ({ p, m: pf.pianoPitch(p) }))) : 0;
+      const keys = sounding.map((p) => ({ p, m: pf.pianoPitch(p) }));
+      const onKey = keys.some((k) => Math.abs(fr.midi - k.m) < 0.5);
+      const clean = fr.clarity >= HARM_CLARITY || (onKey && pf.sinceOnset(end) >= ATTACK * pf.sr);
+      const hn = spec && clean ? spec.harmonics(fr.midi, keys) : 0;
       fr.harm = hn;
       if (hn >= HARM_MIN + (machine ? 2 : 0)) {
         fr.why = 'its own harmonics';

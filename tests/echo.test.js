@@ -46,6 +46,7 @@ function scene(o) {
     }
     t += 0.8;
   }
+  const calEnd = o.calib ? t : 0; // the app marks the calibration as surely quiet
   for (const b of [48, 47, 46]) {
     for (const p of [0, 4, 7]) ev.push({ pitch: b + p, t, d: 1.2, vel: 50 });
     t += 1.2;
@@ -58,6 +59,11 @@ function scene(o) {
     t += 0.6;
   }
   const dur = t + 0.6;
+  if (o.shift) {
+    // the same, that many semitones lower or higher
+    for (const e of ev) e.pitch += o.shift;
+    for (const s of sung) s.pitch += o.shift;
+  }
   const ref = R.piano(ev, sr, dur);
   let room;
   if (o.roomSeed) R.reseed(o.roomSeed); // the same room in two sessions
@@ -108,7 +114,7 @@ function scene(o) {
     const t0 = sung[0].t;
     for (let i = 0; i < mic.length; i++) mic[i] *= 1 - 0.68 * SF.clamp((i / sr - t0) / 2, 0, 1);
   }
-  return { ev, sung, ref, mic, cents: o.voiceDb == null ? 0 : o.cents || 0 };
+  return { ev, sung, ref, mic, calEnd, cents: o.voiceDb == null ? 0 : o.cents || 0 };
 }
 
 /** Streams the scene through the filter as the app does; returns what each sung frame said. */
@@ -131,7 +137,8 @@ function run(sc, pf0) {
   let analyzed = W;
   for (let p = 0; p + B <= sc.mic.length; p += B) {
     const evs = byBlock.get(p / B) || null;
-    pf.push(sc.mic.subarray(p, p + B), sc.ref.subarray(p, p + B), !inSung((p + B / 2) / sr), !!(evs && evs.some((e) => e.on)), evs);
+    const tb = (p + B / 2) / sr;
+    pf.push(sc.mic.subarray(p, p + B), sc.ref.subarray(p, p + B), tb < sc.calEnd ? 2 : !inSung(tb), !!(evs && evs.some((e) => e.on)), evs);
     while (analyzed + 512 <= pf.done) {
       analyzed += 512;
       const tc = (analyzed - W / 2) / sr;
@@ -219,6 +226,15 @@ test('in a harder room, a voice 12 dB under the piano on its very note is heard 
   assert.ok((r.why['its own harmonics'] || 0) > 0.3 * r.frames, JSON.stringify(r.why));
   assert.ok((r.wrong || 0) <= 0.03 * r.frames, 'misread ' + r.wrong);
   assert.ok(Math.abs(SF.median(r.cents) + 8) < 8, 'reads ' + SF.median(r.cents));
+});
+
+test('low notes (below C3): a voice 12 dB under the piano is heard, the piano alone is not', () => {
+  // everything 7 semitones lower: the voice sings G♯2 down to D♯2
+  const r = run(scene({ calib: true, harsh: true, voiceDb: -12, cents: -8, vibrato: 8, seed: 3, shift: -7 }));
+  assert.ok(r.voiced / r.frames > 0.85, 'heard ' + r.voiced + ' of ' + r.frames + ' ' + JSON.stringify(r.src));
+  assert.ok((r.wrong || 0) <= 0.03 * r.frames, 'misread ' + r.wrong);
+  const silent = run(scene({ calib: true, harsh: true, seed: 3, shift: -7 }));
+  assert.ok(silent.voiced <= 0.01 * silent.frames, silent.voiced + ' of ' + silent.frames + ' ' + JSON.stringify(silent.why));
 });
 
 test('in a harder room, the piano alone almost never passes for a voice', () => {

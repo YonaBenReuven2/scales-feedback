@@ -109,10 +109,11 @@
     perfOfFrame(f) {
       return this.offsetMs + (f / this.sr) * 1000;
     }
-    /** Should nobody be singing at page time t? Then the piano is learned from. */
+    /** Should nobody be singing at page time t? Then the piano is learned from (2: the
+     *  calibration, where nobody sings for sure). */
     expectQuiet(t) {
       const p = this.plan;
-      if (p.mode === 'calib') return true;
+      if (p.mode === 'calib') return 2;
       if (p.mode !== 'play' || t < p.from || t > p.until) return false;
       for (const s of p.spans) if (t >= s[0] - 300 && t < s[1] + 300) return false;
       return true;
@@ -153,7 +154,7 @@
       }
       const quiet = this.expectQuiet((t0 + t1) / 2);
       pf.push(a, this.hasRef ? b : null, quiet, onset, events);
-      this.rec.push({ f, a, b, s: m.s || null, perf: m.perf, ctx: m.ctx, q: quiet ? 1 : 0 });
+      this.rec.push({ f, a, b, s: m.s || null, perf: m.perf, ctx: m.ctx, q: quiet === 2 ? 2 : quiet ? 1 : 0 });
       while (this.rec.length && f - this.rec[0].f > this.recordSec * this.sr) this.rec.shift();
       // levels for the meters
       let sm = 0;

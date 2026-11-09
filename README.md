@@ -67,7 +67,7 @@ How it behaves:
 
 **Turn off the mic's own effects.** Laptop microphone arrays (Intel Smart Sound and the like) often adjust their own volume, suppress what they take for noise and aim at your voice, inside Windows, where the browser can't switch it off. The piano then reaches the mic differently from moment to moment, and no filter can keep up: it removes little of the piano and drops your singing. The app notices and says so under *Hear me over the piano*. To fix it: Windows Settings, System, Sound, under Input pick the microphone, set **Audio enhancements** to **Off** (or in More sound settings, Recording, the mic's Properties, tick *Disable all enhancements*). If the laptop has its own audio app (Realtek Audio Console, Dolby, Waves and so on), turn off noise suppression or voice focus there too. Then calibrate again. A plain USB mic avoids all of this.
 
-**The filter lab** (`lab.html`, linked from Settings as *Open the filter lab*) tests the filter on its own. Press **Run the test**: the piano plays the calibration while you stay quiet, then three keys of a short exercise to sing along to (about 40 seconds). It then filters the recording with the app's own code and shows:
+**The filter lab** (`lab.html`, linked from Settings as *Open the filter lab*) tests the filter on its own. Press **Run the test**: the piano plays the calibration while you stay quiet, then three keys of a short exercise to sing along to (about 40 seconds). **Sing from** picks where: do re mi re do from that note, then a semitone and a whole tone lower (B2, say, to see how it does on low notes). The lab remembers its settings. It then filters the recording with the app's own code and shows:
 
 - the delay it found;
 - how much of the piano it removed, by the room filter and after a clean-up of what that leaves;
@@ -127,6 +127,7 @@ The tests cover:
 - the analysis of every exercise in `tests/fixtures`, plus exercises made up in the tests;
 - the player's timing;
 - the piano filter in a harder room too (an echo longer than it models, speakers that distort a little, a room that shifts): singing off the piano's note is heard however much piano is left, singing on it is heard when it stands out (also 12 dB under the piano, by its harmonics), and the piano alone almost never passes for a voice;
+- low notes (below C3), heard by their harmonics and not credited from the piano alone;
 - the clean-up of what the room filter leaves, and a room saved from last time that isn't spoiled by the first chords it hears again;
 - the sound files the app and the lab save, read back;
 - finding and opening the mic and the piano's input the way Chrome on Windows lists them (names hidden until allowed, or always on a page opened from the disk; Windows' default input; a piano input that is busy or never answers);

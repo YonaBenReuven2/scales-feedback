@@ -58,7 +58,7 @@ test('when singing is expected, from the plan', () => {
   assert.strictEqual(ears.expectQuiet(500), false, 'before playing started');
   assert.strictEqual(ears.expectQuiet(9500), false, 'beyond what the plan knows');
   ears.handle({ type: 'plan', plan: { mode: 'calib' } });
-  assert.strictEqual(ears.expectQuiet(4200), true);
+  assert.strictEqual(ears.expectQuiet(4200), 2, 'the calibration: nobody sings for sure');
   ears.handle({ type: 'plan', plan: { mode: 'stopped' } });
   assert.strictEqual(ears.expectQuiet(3300), false);
 });

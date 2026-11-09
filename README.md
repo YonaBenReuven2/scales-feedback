@@ -53,7 +53,7 @@ Use Chrome or Edge. Firefox and Safari have no Web MIDI, so they can't play the 
 The P-225 sends its own sound to the computer over USB. In Windows it shows up as an audio input, *Line (P-Series)*. The app learns how that sound reaches your mic, through the speakers and the room. It subtracts it from the mic so only your voice is left, even when you sing the same note the piano plays.
 
 1. In Settings, under **Hear me over the piano**, pick *Line (P-Series)* in **The piano's USB audio** (the list fills once the mic is on; opened from the disk it stays empty, so press **Ask Chrome for the piano's input** and choose *Line (P-Series)* in Chrome's box). Picking it turns the filter on, and the bar under the list moves when you play a key. Ticking **Cancel the piano's sound from the mic** does the same with the piano's input found automatically. Next time it reconnects by itself, also when the piano is switched on after the page is open.
-2. Press **Calibrate**. The piano plays a quick run of every key in the exercise's range, then three chords, while you stay quiet. It takes about 12 seconds.
+2. Press **Calibrate** and stay quiet. The piano plays three chords, a quick run over the exercise's range, then every key in it one at a time, as loud as your guide notes. It takes 15 to 20 seconds. The run teaches it the room; the single keys measure how much of each key is left after cancelling, since rooms leave much more of some notes than of others.
 
 The calibration is remembered for that piano input and mic pair. Calibrate again after moving the laptop, the mic or the piano's volume.
 
@@ -61,7 +61,9 @@ How it behaves:
 
 - **Keys it hasn't heard aren't scored** while the piano plays them, so the piano can never sing a note for you. Without calibrating, it only learns the keys of the reference chords as they go by. That's enough for *Chord only*, but not for *Play my notes*.
 - **Filter status:** Settings shows the measured delay between the piano and the mic, how many dB of the piano it removes, and how many keys it knows. 25 dB or more is good.
-- **Loud piano, quiet voice:** when too much of the piano is left for your voice to stand out, the app can't tell whether you sang. Those notes get no verdict rather than *not heard*, and it says so. Calibrating, turning the piano down a little or sitting closer to the mic all help.
+- **A pitch the piano isn't playing is always heard.** What's left of the piano after cancelling only has the piano's own pitches. So when you're sharp, flat or on another note, you're heard straight away, however much piano is left.
+- **On the very note the piano plays** it comes down to loudness: your voice has to stand out from what the room usually leaves of that key. Once it has, it keeps being heard at a lower level while you hold that pitch.
+- **Loud piano, quiet voice:** when too much of the piano is left for your voice to stand out, the app can't tell whether you sang. Those moments get no verdict rather than *not heard*, and a note mostly made of them gets none either. What helps most is a softer guide (**Your notes touch**) or the piano's volume a little lower, then the mic closer to you than to the piano's speakers, then calibrating again.
 
 If an input won't open, the line under it says why (blocked by the browser, used by another program, unplugged, or no answer). **Copy a device report**, at the end of this section, copies what the browser says about every input, to paste into a message.
 
@@ -108,6 +110,7 @@ The tests cover:
 - the MIDI parser;
 - the analysis of every exercise in `tests/fixtures`, plus exercises made up in the tests;
 - the player's timing;
+- the piano filter in a harder room too (an echo longer than it models, speakers that distort a little, a room that shifts): singing off the piano's note is heard however much piano is left, singing on it is heard when it stands out, and the piano alone almost never passes for a voice;
 - finding and opening the mic and the piano's input the way Chrome on Windows lists them (names hidden until allowed, or always on a page opened from the disk; Windows' default input; a piano input that is busy or never answers);
 - scoring;
 - pitch detection;

@@ -417,6 +417,25 @@
       // would leave most of its sound behind and could pass for a voice.
       this.keyLearn = new Uint8Array(128);
       this.keys = []; // {p, i0, i1}: when each key sounded, in reference samples
+      // How the piano is tuned (cents from equal temperament), read from its own audio when
+      // a key sounds alone: a pitch well away from every note it plays can't be its leftover.
+      this.tune = new Float32Array(128);
+      this.tuneN = new Uint16Array(128);
+      this.gTune = 0;
+      this.gTuneN = 0;
+      // the echo's envelope (the room rings on after the predicted piano stops), and how much
+      // of it is left after cancelling, per analysis frame, while nobody sings (dB)
+      this.env = 0;
+      this.envEnd = 0;
+      this.envPeak = 0;
+      this.fCount = 0;
+      this.fMean = 0;
+      this.fVar = 0;
+      this.vref = null; // the last frame believed to be the voice: {end, midi}
+      // the same per key, from frames where it sounds alone (the calibration run plays each
+      // key on its own): rooms leave much more of some notes than of others
+      this.kMean = new Float32Array(128);
+      this.kN = new Uint16Array(128);
       this.n = 0; // samples captured
       this.tracker = new DelayTracker(sampleRate, opts);
       // once the room is known: how far the mic is from the predicted piano (0 when aligned)
@@ -544,6 +563,95 @@
       let m = Infinity;
       for (const k of this.keys) if (k.i0 <= e1 && k.i1 >= e0 && this.keyLearn[k.p] < m) m = this.keyLearn[k.p];
       return m;
+    }
+    /** The keys sounding into the mic frame ending at end: held, or released less than
+     *  RING seconds before (they ring on into the room). */
+    soundingKeys(end, W) {
+      const d = this.dUsed || 0;
+      const e1 = end - d;
+      const e0 = end - W - d - this.sr * SOUNDING_RING;
+      const out = [];
+      for (const k of this.keys) if (k.i0 <= e1 && k.i1 >= e0 && out.indexOf(k.p) < 0) out.push(k.p);
+      return out;
+    }
+    /** The pitch the piano really sounds for key p (MIDI, fractional). */
+    pianoPitch(p) {
+      return p + (this.tuneN[p] ? this.tune[p] : this.gTune) / 100;
+    }
+    /** When one key sounds alone (past its attack), read its pitch from the piano's own audio. */
+    learnTuning(det, end, W) {
+      const d = this.dUsed || 0;
+      const e1 = end - d;
+      const e0 = e1 - W;
+      if (e0 < 0 || e0 <= this.n - this.cap) return;
+      let only = null;
+      for (const k of this.keys) {
+        if (k.i0 > e1 || k.i1 < e0 - this.sr * 0.3) continue;
+        if (only) return; // more than one
+        only = k;
+      }
+      if (!only || only.i0 > e0 - this.sr * 0.08 || only.i1 < e1) return;
+      const buf = this.tuneBuf || (this.tuneBuf = new Float32Array(W));
+      for (let i = 0; i < W; i++) buf[i] = this.refR[(e0 + i) & this.mask];
+      const r = lowPitch(this, buf, W);
+      if (!(r && r.clarity >= 0.9)) return;
+      const c = (r.midi - only.p) * 100;
+      if (Math.abs(c) > 50) return;
+      const p = only.p;
+      this.tuneN[p] = Math.min(this.tuneN[p] + 1, 1000);
+      this.tune[p] += (c - this.tune[p]) / Math.min(this.tuneN[p], 20);
+      this.gTuneN = Math.min(this.gTuneN + 1, 1000);
+      this.gTune += (c - this.gTune) / Math.min(this.gTuneN, 50);
+    }
+    /** The echo's envelope for the frame ending at end: its energy now, or what is still
+     *  ringing in the room from just before (an energy time constant of TAIL seconds). */
+    envelope(ee, end) {
+      const dt = end - this.envEnd;
+      this.env = Math.max(ee, dt > 0 ? this.env * Math.exp(-dt / (this.sr * TAIL)) : this.env);
+      this.envEnd = Math.max(end, this.envEnd);
+      this.envPeak = Math.max(this.env, this.envPeak * Math.exp(-Math.max(0, dt) / (this.sr * 20)));
+      return this.env;
+    }
+    /** How much of the piano is left after cancelling, from a frame where nobody sings. */
+    noteLeftover(rDb) {
+      // far more left than usual: someone is singing or talking over it. Skip it (but not
+      // forever: a long run of it means the room itself changed)
+      const odd = this.fCount >= 30 && rDb > this.fMean + 3 * Math.max(2, Math.sqrt(this.fVar));
+      this.fOdd = odd ? (this.fOdd || 0) + 1 : 0;
+      if (odd && this.fOdd <= 120) return;
+      this.fCount++;
+      if (this.fCount === 1) {
+        this.fMean = rDb;
+        this.fVar = 9;
+        return;
+      }
+      const a = this.fCount < 50 ? 1 / this.fCount : 0.02;
+      const d = rDb - this.fMean;
+      this.fMean += a * d;
+      this.fVar = (1 - a) * (this.fVar + a * d * d);
+    }
+    /** The key sounding alone through the mic frame ending at end (others released at least
+     *  120 ms before it), or null. */
+    soloKey(end, W) {
+      const d = this.dUsed || 0;
+      const e1 = end - d;
+      const e0 = end - W - d;
+      let solo = null;
+      for (const k of this.keys) {
+        if (k.i1 <= e0 - this.sr * 0.12 || k.i0 > e1) continue;
+        if (solo || !(k.i0 <= e0 - this.sr * 0.02 && k.i1 >= e1)) return null;
+        solo = k;
+      }
+      return solo ? solo.p : null;
+    }
+    /** Per key, kept as how much more (or less) is left of it than of the room as a whole
+     *  at the time: the room changes (people move, the lid, the volume), its keys with it. */
+    noteKeyLeftover(p, rDb) {
+      if (this.fCount < 10) return;
+      const off = rDb - this.fMean;
+      if (off > 3 * Math.max(3, Math.sqrt(this.fVar)) + 9) return; // a voice over it
+      this.kN[p] = Math.min(this.kN[p] + 1, 1000);
+      this.kMean[p] += (off - this.kMean[p]) / Math.min(this.kN[p], 20);
     }
     /** Keys learned so far (for the UI). */
     get keysLearned() {
@@ -732,7 +840,22 @@
     /** What was learned about the room, to start the next session from. */
     exportState() {
       if (!this.solved || !this.room.hc) return null;
-      return { v: 2, sr: this.sr, delay: this.dUsed, hc: Float32Array.from(this.room.hc), lMean: this.lMean, lVar: this.lVar, keys: Array.from(this.keyLearn) };
+      return {
+        v: 2,
+        sr: this.sr,
+        delay: this.dUsed,
+        hc: Float32Array.from(this.room.hc),
+        lMean: this.lMean,
+        lVar: this.lVar,
+        keys: Array.from(this.keyLearn),
+        fMean: this.fCount >= 30 ? this.fMean : null,
+        fVar: this.fVar,
+        kOff: Array.from(this.kMean),
+        kN: Array.from(this.kN),
+        tune: Array.from(this.tune),
+        tuneN: Array.from(this.tuneN),
+        gTune: this.gTune,
+      };
     }
     /** Offer a saved room; it is used if the measured delay matches it (same setup). */
     importState(st) {
@@ -753,6 +876,25 @@
         this.lMean = st.lMean;
         this.lVar = st.lVar;
         this.lCount = 30;
+      }
+      if (st.fMean != null) {
+        this.fMean = st.fMean;
+        this.fVar = st.fVar;
+        this.fCount = 30;
+      }
+      if (st.kOff && st.kN) {
+        for (let p = 0; p < 128; p++) {
+          this.kMean[p] = st.kOff[p] || 0;
+          this.kN[p] = Math.min(st.kN[p] || 0, 20);
+        }
+      }
+      if (st.tune && st.tuneN) {
+        for (let p = 0; p < 128; p++) {
+          this.tune[p] = st.tune[p] || 0;
+          this.tuneN[p] = Math.min(st.tuneN[p] || 0, 20);
+        }
+        this.gTune = st.gTune || 0;
+        this.gTuneN = 20;
       }
     }
     /** Delay expected at mic index m: the trend of recent measurements (clock drift), else the last. */
@@ -861,15 +1003,93 @@
       this.lCount = 0;
       this.echoPeak = 0;
       this.keyLearn.fill(0);
+      this.fCount = 0;
+      this.kN.fill(0);
+      this.vref = null;
       this.restored = false;
       this.alignPos = this.n;
       this.done = this.n;
     }
   }
 
+  const RING = 0.5; // seconds a released key still rings into the mic
+  const SOUNDING_RING = 0.3; // ... loud enough to read as one of the piano's pitches
+  const TAIL = 0.08; // energy time constant of the room's ring after the piano stops (s)
+  const DEV = 0.3; // semitones: a pitch this far from every note the piano plays isn't its leftover
+
+  /**
+   * The pitch of the low band of a window (below about 1 kHz), or null. Piano strings'
+   * overtones are stretched, and what is left of the piano after cancelling is mostly its
+   * high ones, which read sharp; down here they are barely stretched, and the voice is strong.
+   */
+  function lowPitch(pf, src, W) {
+    if (!pf.lowDet || pf.lowDet.W !== W) {
+      pf.lowDet = new SF.PitchDetector(pf.sr, W);
+      pf.lowBuf = new Float32Array(W);
+      // 2nd-order Butterworth low-pass, run forward and back (no phase shift)
+      const w = Math.tan((Math.PI * 1000) / pf.sr);
+      const q = Math.SQRT2;
+      const n = 1 / (1 + q * w + w * w);
+      pf.lowK = [w * w * n, 2 * w * w * n, w * w * n, 2 * (w * w - 1) * n, (1 - q * w + w * w) * n];
+    }
+    const [b0, b1, b2, a1, a2] = pf.lowK;
+    const y = pf.lowBuf;
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < W; i++) {
+      const x = src[i];
+      const v = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = v;
+      y[i] = v;
+    }
+    x1 = x2 = y1 = y2 = 0;
+    for (let i = W - 1; i >= 0; i--) {
+      const x = y[i];
+      const v = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = v;
+      y[i] = v;
+    }
+    const r = pf.lowDet.detect(y);
+    return r.freq > 0 ? { midi: SF.hzToMidi(r.freq), clarity: r.clarity } : null;
+  }
+
+  /** Does m (in any octave) lie between two of the pitches ps that are under 2.5 semitones apart? */
+  function between(m, ps) {
+    const pc = (x) => (((x % 12) + 12) % 12);
+    const c = pc(m);
+    let below = Infinity;
+    let above = Infinity;
+    for (const p of ps) {
+      const d = pc(p) - c;
+      const up = ((d % 12) + 12) % 12; // semitones up to p
+      const down = (12 - up) % 12; // semitones down to p
+      if (up > 0 && up < above) above = up;
+      if (down > 0 && down < below) below = down;
+    }
+    return above + below < 2.5;
+  }
+
+  /** Distance in semitones (0..6) from midi to the nearest of the pitches ps, in any octave. */
+  function pcDist(m, ps) {
+    let best = Infinity;
+    for (const p of ps) {
+      let d = (m - p) % 12;
+      if (d < 0) d += 12;
+      if (d > 6) d = 12 - d;
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   /**
    * One analysis frame ending at index end (<= pf.done): the pitch of what is left after
-   * cancelling, and whether a voice is really there.
+   * cancelling, and whether it is the voice.
+   *
+   * The piano's leftover can only ever have the piano's pitches. So a clear pitch well away
+   * from every note the piano is sounding (DEV, in any octave) is the voice, however much
+   * piano is left. Only on the very note the piano plays does it come down to loudness:
+   * then the voice must stand out from what is usually left of the piano (measured while
+   * nobody sings), clearly to be believed, a little to go on being believed while it holds
+   * the pitch it was just heard on.
    */
   function analyzeFrame(pf, tracker, end, t, opts) {
     opts = opts || {};
@@ -892,50 +1112,130 @@
     fr.micDb = db(em);
     fr.echoDb = db(ee);
     fr.source = 'mic';
-    if (!pf.ready) {
-      // The piano is connected but its sound can't be removed yet: while it plays (or
-      // rings on into the mic) nothing is believed, so it can't sing notes for you.
-      if (pf.hasRef && pf.refPeak(end - W - pf.tracker.maxLag, end) > (opts.refFloor || 1e-7)) {
-        fr.voiced = false;
-        fr.midi = null;
-        fr.source = 'learning';
-      }
+    if (!pf.hasRef) {
+      noteVoice(pf, fr, er, W, end);
       return fr;
     }
-    if (pf.unlearnedAt(end, W) || pf.offBy >= 2) {
-      // a key the room hasn't been learned for: calibrating teaches it every key
+    // how the piano is tuned, from its own audio (now and then: it doesn't change)
+    if ((pf.tuneTick = (pf.tuneTick || 0) + 1) % 4 === 0) pf.learnTuning(null, end, W);
+    const env = pf.envelope(ee, end);
+    const sounding = pf.soundingKeys(end, W);
+    const pianoOn = pf.ready ? env > 1e-9 * W : pf.refPeak(end - W - pf.tracker.maxLag, end) > (opts.refFloor || 1e-7);
+    if (!pianoOn) {
+      noteVoice(pf, fr, er, W, end); // no piano to remove here
+      return fr;
+    }
+    if (pf.ready) fr.source = 'filtered';
+    if (!pf.ready || pf.unlearnedAt(end, W) || pf.offBy >= 2) {
+      // keys the room hasn't been learned for (or the alignment is in doubt): the piano could
+      // be singing any of it. Calibrating teaches every key.
       fr.voiced = false;
       fr.midi = null;
       fr.source = 'learning';
       return fr;
     }
-    if (ee < 1e-9 * W) {
-      noteVoice(pf, fr, er, W); // no piano to remove here
-      return fr;
+    // what is left, against the usual leftover of the piano heard just now (dB)
+    const rDb = er > 0 && env > 0 ? 10 * Math.log10(er / env) : -120;
+    const quiet = pf.quietAt(end - 1) && pf.quietAt(end - W);
+    if (quiet && env >= 1e-8 * W && env >= 0.03 * pf.envPeak) {
+      pf.noteLeftover(rDb);
+      const solo = pf.soloKey(end, W);
+      if (solo != null) pf.noteKeyLeftover(solo, rDb);
     }
-    const expected = ee * Math.max(pf.leftover, 0.002);
-    fr.presence = er / expected;
-    fr.source = 'filtered';
-    // the leftover is measured on the chords, which it hears all the time; a key heard only a
-    // few times (in the calibration run) is cancelled less well, so ask for more there
-    const margin = (opts.margin || 4) * (pf.leastLearned(end, W) < 8 ? 2 : 1);
-    if (er < margin * expected) {
-      fr.voiced = false;
-      fr.midi = null;
-      // Nothing above the piano's leftover. That means "not singing" only if the singer's
-      // usual level would have stood out; if what is left of the piano is about as loud
-      // as the voice, it can't tell, and says so rather than mark you silent.
-      const needDb = db(margin * expected);
-      const voiceDb = pf.voiceDb != null ? pf.voiceDb : opts.voiceDb || -35;
-      fr.source = needDb > voiceDb - 3 ? 'unsure' : 'piano';
-    } else noteVoice(pf, fr, er, W);
+    let mu;
+    let sd;
+    if (pf.fCount >= 30) {
+      mu = pf.fMean;
+      sd = Math.sqrt(Math.max(0, pf.fVar));
+    } else {
+      // not enough heard yet: the block measurements, already on the high side
+      mu = 10 * Math.log10(Math.max(pf.leftover, 0.002));
+      sd = 3;
+    }
+    // The usual leftover of the keys sounding now: measured key by key where it was (the
+    // worst of them counts); else the room's, a little higher for a key heard only a few
+    // times (in the calibration run), which is cancelled less well.
+    let muK = -Infinity;
+    for (const p of sounding) {
+      // (a key not measured on its own may be one the room leaves much more of: careful)
+      const m = pf.kN[p] >= 6 ? mu + Math.max(pf.kMean[p], -4) : mu + 6;
+      if (m > muK) muK = m;
+    }
+    if (muK === -Infinity) muK = mu + (pf.leastLearned(end, W) < 8 ? 3 : 0);
+    const strongDb = muK + SF.clamp(3 * sd, 8, 12);
+    const weakDb = muK + SF.clamp(2 * sd, 4, 8);
+    fr.presence = Math.pow(10, (rDb - muK) / 10);
+    if (fr.voiced && sounding.length) {
+      // A pitch the piano isn't playing: its leftover can't make that, so it's the voice,
+      // provided the reading is clean (the low band agrees, clear, at least as loud as the
+      // usual leftover) and not between two notes the piano sounds close together, where two
+      // of its own sounds mixed can read.
+      // (judged on the low band when it agrees with the full reading: there the piano's
+      // leftover reads true, while its stretched high overtones pull the full reading sharp)
+      const ps = sounding.map((p) => pf.pianoPitch(p));
+      const low = fr.clarity >= 0.85 ? lowPitch(pf, buf, W) : null;
+      const agree = low && low.clarity >= 0.9 && Math.abs((((low.midi - fr.midi + 6) % 12) + 12) % 12 - 6) <= 0.35;
+      const dev = pcDist(agree ? low.midi : fr.midi, ps);
+      fr.dev = dev;
+      if (dev >= DEV) {
+        if (agree && fr.clarity >= 0.9 && rDb >= muK + 3 && (rDb >= weakDb || !between(low.midi, ps))) {
+          fr.why = 'other pitch';
+          noteVoice(pf, fr, er, W, end);
+          return fr;
+        }
+        fr.voiced = false;
+        fr.midi = null;
+        fr.source = 'unsure';
+        return fr;
+      }
+    }
+    // A held piano note reads dead steady (to a cent, perfectly clear); a voice wavers a
+    // little. Steady as a machine on the piano's own note: ask for much more before
+    // believing it is you.
+    const raws = pf.raws || (pf.raws = []);
+    if (fr.voiced && fr.raw != null && (!raws.length || end - raws[raws.length - 1].end <= 600)) raws.push({ end, m: fr.raw });
+    else raws.length = 0;
+    if (raws.length > 6) raws.shift();
+    let machine = false;
+    if (fr.voiced && raws.length === 6 && fr.clarity >= 0.985) {
+      let m = 0;
+      for (const r of raws) m += r.m;
+      m /= 6;
+      let v = 0;
+      for (const r of raws) v += (r.m - m) * (r.m - m);
+      machine = Math.sqrt(v / 6) * 100 < 1.2;
+    }
+    const extra = machine ? 6 : 0;
+    if (fr.voiced) {
+      if (rDb >= strongDb + extra) {
+        fr.why = 'louder than the piano';
+        noteVoice(pf, fr, er, W, end);
+        return fr;
+      }
+      // still the voice heard a moment ago, on the same pitch, a little above the piano
+      const v = pf.vref;
+      if (v && end - v.end <= 600 && Math.abs(fr.midi - v.midi) <= 0.4 && rDb >= weakDb + extra) {
+        fr.why = 'holding';
+        noteVoice(pf, fr, er, W, end);
+        return fr;
+      }
+    } else if (rDb >= strongDb) return fr; // something well above the piano, but no pitch
+    // Nothing that is surely the voice. That means "not singing" only when what is left is
+    // just the piano's usual leftover and the singer's usual level would have stood out;
+    // otherwise it can't tell, and says so rather than mark you silent.
+    fr.voiced = false;
+    fr.midi = null;
+    const voiceDb = pf.voiceDb != null ? pf.voiceDb : opts.voiceDb || -35;
+    const pianoDb = db(env) + strongDb;
+    fr.source = rDb < weakDb && pianoDb < voiceDb - 6 ? 'piano' : 'unsure';
     return fr;
   }
-  /** Keep a running idea of how loud the singer is at the mic. */
-  function noteVoice(pf, fr, er, W) {
+  /** Keep a running idea of how loud the singer is at the mic, and where the voice was. */
+  function noteVoice(pf, fr, er, W, end) {
     if (!fr.voiced || !(er > 0)) return;
     const d = 10 * Math.log10(er / W);
     pf.voiceDb = pf.voiceDb == null ? d : pf.voiceDb + 0.01 * (d - pf.voiceDb);
+    if (end != null) pf.vref = { end, midi: fr.midi };
   }
 
   SF.DelayTracker = DelayTracker;
@@ -943,4 +1243,5 @@
   SF.Convolver = Convolver;
   SF.PianoFilter = PianoFilter;
   SF.analyzeFrame = analyzeFrame;
+  SF.pcDist = pcDist;
 });

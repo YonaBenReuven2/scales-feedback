@@ -187,6 +187,10 @@ registerProcessor('sf-capture', SFCapture);`;
         case 'room':
           this.emit('room', m.st);
           break;
+        case 'dump':
+          if (this.dumpWait) this.dumpWait(m);
+          this.dumpWait = null;
+          break;
       }
     }
     /** The engine on the page, for tests and debugging (null when it runs in a worker). */
@@ -213,12 +217,24 @@ registerProcessor('sf-capture', SFCapture);`;
       } catch (e) {
         plan = { mode: 'stopped' };
       }
-      this.send({ type: 'plan', plan });
+      this.send({ type: 'plan', plan, at: SF.now() });
     }
     /** A saved room to start from (used if the measured delay matches). */
     offerRoom(st) {
       this.savedRoom = st || null;
       if (st && this.engine) this.send({ type: 'room', st });
+    }
+    /** The last 40 seconds of both inputs and what was decided about them: {mic, ref, meta}. */
+    dump() {
+      if (!this.engine || !this.running) return Promise.reject(new Error('the mic is off'));
+      return new Promise((res, rej) => {
+        const t = setTimeout(() => rej(new Error('no answer from the listening engine')), 5000);
+        this.dumpWait = (m) => {
+          clearTimeout(t);
+          res(m);
+        };
+        this.send({ type: 'dump' });
+      });
     }
     /** Ask for what was learned: it arrives as a 'room' event. */
     saveRoom() {

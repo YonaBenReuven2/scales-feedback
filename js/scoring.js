@@ -25,6 +25,7 @@
           tolerance: 35, // cents
           octaveFree: false,
           minVoiced: 0.3, // share of a note's frames that must be sung
+          minJudged: 0.25, // share of a note's frames that must be judged at all (not 'unsure')
           // seconds not judged at a note's start and end, while the voice moves between
           // notes (still on the last one, or already on the next)
           grace: 0.12,
@@ -129,17 +130,20 @@
         }
         const keys = new Set();
         // 'learning' / 'unsure': the piano can't be told apart from you here, so these
-        // frames say nothing either way
+        // frames say nothing either way (but they are counted: a note judged from only a few
+        // frames gets no verdict)
         const unknown = fr.source === 'learning' || fr.source === 'unsure';
-        for (const n of unknown ? [] : targets) {
+        for (const n of targets) {
           const k = this.keyOf(seg, n);
           if (keys.has(k)) continue;
           keys.add(k);
           let a = this.acc.get(k);
           if (!a) {
-            a = { frames: 0, voiced: 0, cents: [], voices: new Map(), seg, note: n };
+            a = { frames: 0, all: 0, voiced: 0, cents: [], voices: new Map(), seg, note: n };
             this.acc.set(k, a);
           }
+          a.all++;
+          if (unknown) continue;
           a.frames++;
           if (fr.voiced) {
             // in 'any' mode a slot is scored against whichever voice was sung
@@ -199,7 +203,8 @@
       }
     }
     verdict(a) {
-      if (a.frames < 2) return { status: 'none' };
+      // too little of the note could be told apart from the piano to say anything
+      if (a.frames < 2 || a.frames < this.opts.minJudged * (a.all || a.frames)) return { status: 'none' };
       const ratio = a.voiced / a.frames;
       let voice = null;
       let vmax = 0;

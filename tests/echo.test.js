@@ -16,8 +16,25 @@ function scene(o) {
   const ev = [];
   const sung = [];
   let t = 0.3;
-  if (o.calib) {
-    // as the app calibrates: a run over the range, then three chords
+  if (o.calib && o.solo !== false) {
+    // as the app calibrates: three chords, then each key alone, as loud as the guide
+    for (const ch of [[0, 4, 7], [-5, 0, 4], [-3, 0, 5]]) {
+      for (const dd of ch) ev.push({ pitch: 56 + dd, t, d: 0.6, vel: 50 });
+      t += 0.7;
+    }
+    t += 0.3;
+    for (let m = 44; m <= 64; m++) {
+      ev.push({ pitch: m, t, d: 0.33, vel: 62 });
+      t += 0.15;
+    }
+    t += 0.7;
+    for (let m = 44; m <= 64; m++) {
+      ev.push({ pitch: m, t, d: 0.25, vel: 62 });
+      t += 0.3;
+    }
+    t += 1.2;
+  } else if (o.calib) {
+    // as the app used to calibrate: an overlapping run over the range, then three chords
     for (let m = 44; m <= 64; m++) {
       ev.push({ pitch: m, t, d: 0.33, vel: 60 });
       t += 0.15;
@@ -42,11 +59,28 @@ function scene(o) {
   }
   const dur = t + 0.6;
   const ref = R.piano(ev, sr, dur);
-  const room = R.shift(R.convolve(ref, R.roomIR(sr, { rt60: 0.35 })), 0.0283 * sr, o.drift || 0);
+  let room;
+  if (!o.harsh) room = R.shift(R.convolve(ref, R.roomIR(sr, { rt60: 0.35 })), 0.0283 * sr, o.drift || 0);
+  else {
+    // a harder room: speakers that distort a little, an echo longer than the filter models,
+    // and a room that shifts as you move. About 15 dB of the piano can be removed.
+    const x = new Float32Array(ref.length);
+    for (let i = 0; i < x.length; i++) x[i] = Math.tanh(0.6 * ref[i]) / 0.6;
+    const ya = R.convolve(x, R.roomIR(sr, { rt60: 0.6 }));
+    const yb = R.convolve(x, R.roomIR(sr, { rt60: 0.6 }));
+    const y = new Float32Array(x.length);
+    for (let i = 0; i < y.length; i++) {
+      const w = 0.12 + 0.08 * Math.sin((2 * Math.PI * i) / sr / 6);
+      y[i] = (1 - w) * ya[i] + w * yb[i];
+    }
+    room = R.shift(y, 0.0283 * sr, 0);
+  }
   const v = new Float32Array(ref.length);
   if (o.voiceDb != null) {
     for (const s of sung) {
-      const seg = voice(() => s.pitch + (o.cents || 0) / 100, sr, s.d, { vowel: 'a' });
+      // a voice always wavers a little (a held piano note doesn't): 5 cents unless set
+      const vib = o.vibrato == null ? 5 : o.vibrato;
+      const seg = voice(() => s.pitch + (o.cents || 0) / 100, sr, s.d, { vowel: 'a', vibrato: vib ? { rate: 5.5, cents: vib } : null });
       const i0 = Math.round(s.t * sr);
       for (let i = 0; i < seg.length && i0 + i < v.length; i++) {
         const tt = i / sr;
@@ -68,7 +102,7 @@ function scene(o) {
   const g = o.voiceDb == null ? 0 : Math.sqrt(pe / Math.max(ve, 1e-12)) * Math.pow(10, o.voiceDb / 20);
   const mic = new Float32Array(ref.length);
   for (let i = 0; i < mic.length; i++) mic[i] = room[i] + g * v[i] + 2e-4 * R.gauss();
-  return { ev, sung, ref, mic };
+  return { ev, sung, ref, mic, cents: o.voiceDb == null ? 0 : o.cents || 0 };
 }
 
 /** Streams the scene through the filter as the app does; returns what each sung frame said. */
@@ -87,7 +121,7 @@ function run(sc) {
     add(e.t, { p: e.pitch, on: true });
     add(e.t + e.d, { p: e.pitch, on: false });
   }
-  const out = { frames: 0, hit: 0, voiced: 0, cents: [], src: {}, log: process.env.ECHO_LOG ? [] : null };
+  const out = { frames: 0, hit: 0, voiced: 0, cents: [], src: {}, why: {}, log: process.env.ECHO_LOG ? [] : null };
   let analyzed = W;
   for (let p = 0; p + B <= sc.mic.length; p += B) {
     const evs = byBlock.get(p / B) || null;
@@ -101,8 +135,10 @@ function run(sc) {
       out.frames++;
       out.src[fr.source] = (out.src[fr.source] || 0) + 1;
       if (out.log) out.log.push([+tc.toFixed(2), s.pitch, fr.source, fr.voiced ? +fr.midi.toFixed(2) : null, fr.presence == null ? null : +fr.presence.toFixed(1), +pf.leftover.toFixed(4), pf.leastLearned(analyzed, W)]);
+      if (fr.voiced && fr.why) out.why[fr.why] = (out.why[fr.why] || 0) + 1;
       if (fr.voiced) {
         out.voiced++;
+        if (Math.abs(fr.midi - (s.pitch + (sc.cents || 0) / 100)) > 0.5) out.wrong = (out.wrong || 0) + 1;
         (out.vf = out.vf || []).push([+tc.toFixed(2), s.pitch, +fr.midi.toFixed(2), +(fr.presence || 0).toFixed(1)]);
         const c = (fr.midi - s.pitch) * 100;
         out.cents.push(c);
@@ -152,4 +188,25 @@ test('clock drift between the two devices is followed', () => {
   assert.ok(Math.abs(SF.median(r.cents)) < 5, 'in tune: ' + SF.median(r.cents));
   const silent = run(scene({ calib: true, drift: 40e-6 }));
   assert.strictEqual(silent.voiced, 0, 'nothing from the piano alone: ' + JSON.stringify(silent.src));
+});
+
+test('in a harder room, singing off the piano’s note is heard however much piano is left', () => {
+  // 60 cents sharp, 12 dB under the piano, with the guide playing the right notes
+  const r = run(scene({ calib: true, harsh: true, voiceDb: -12, cents: 60, vibrato: 8, seed: 3 }));
+  assert.ok(r.voiced / r.frames > 0.6, 'heard ' + r.voiced + ' of ' + r.frames + ' ' + JSON.stringify(r.src));
+  assert.ok((r.wrong || 0) <= 0.03 * r.frames, 'misread ' + r.wrong);
+  const med = SF.median(r.cents);
+  assert.ok(Math.abs(med - 60) < 12, 'reads ' + med + ' cents (sang +60)');
+});
+
+test('in a harder room, singing the very note the piano plays is heard when it stands out', () => {
+  const r = run(scene({ calib: true, harsh: true, voiceDb: -6, cents: -8, vibrato: 8, seed: 3 }));
+  assert.ok(r.voiced / r.frames > 0.6, 'heard ' + r.voiced + ' of ' + r.frames + ' ' + JSON.stringify(r.src));
+  assert.ok(Math.abs(SF.median(r.cents) + 8) < 8, 'reads ' + SF.median(r.cents));
+});
+
+test('in a harder room, the piano alone almost never passes for a voice', () => {
+  const r = run(scene({ calib: true, harsh: true, seed: 3 }));
+  assert.ok(r.voiced <= 0.03 * r.frames, r.voiced + ' of ' + r.frames + ' frames: ' + JSON.stringify(r.src));
+  assert.ok(r.pf.kN.some((n) => n >= 6), 'measured keys on their own in the calibration');
 });

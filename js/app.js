@@ -147,7 +147,7 @@
     if (!scorer.live.listening) return;
     if (fr.source === 'learning' && !learningTold && ++learningFrames > 60) {
       learningTold = true;
-      toast('The piano filter is still learning these keys, so they aren’t scored yet. Calibrate under Settings, Hear me over the piano: it takes about 12 seconds.', 6500);
+      toast('The piano filter is still learning these keys, so they aren’t scored yet. Calibrate under Settings, Hear me over the piano: it takes about 15 to 20 seconds.', 6500);
     } else if (fr.source === 'unsure' && !unsureTold && ++unsureFrames > 120) {
       unsureTold = true;
       toast('Too much of the piano is left to hear you, so these notes aren’t scored. Calibrate under Settings, or turn the piano down a little.', 6500);
@@ -456,6 +456,9 @@
       st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Removes about ' + Math.round(f.cancelDb) + ' dB of the piano' + (f.restored ? ' (remembered from last time)' : '') + '. ';
       const need = ex ? ex.hi - ex.lo + 1 : 37;
       st += f.keys >= need ? 'Knows ' + f.keys + ' keys.' : 'Knows ' + f.keys + (f.keys === 1 ? ' key' : ' keys') + ' so far: calibrate to learn the rest.';
+      // calibrating measures how much of each key is left; without that it is careful on the
+      // very note the piano plays, and hears you there less readily
+      if (!f.measured) st += ' Calibrate again: it now measures each key, which lets it hear you better on the notes the piano plays.';
     }
     $('refStatus').textContent = st;
     $('refStatus').className = 'status' + (f && f.ready ? ' ok' : '');
@@ -993,20 +996,33 @@
     const hi = ex ? SF.clamp(ex.hi + 2, lo + 12, 96) : 76;
     const notes = [];
     for (let m = lo; m <= hi; m++) notes.push(m);
-    const step = Math.max(110, Math.min(160, 7000 / notes.length));
+    // each key on its own, as loud as the notes you sing to: the filter measures how much of
+    // every key the room leaves behind (rooms leave much more of some notes than of others)
+    const step = Math.max(260, Math.min(320, 9000 / notes.length));
+    const vel = Math.max(S.velAcc, S.velSing);
+    // first three chords, from which it finds the delay and a first idea of the room (so it
+    // is ready to measure by the time the keys come one by one)
     const t0 = SF.now() + 600;
-    notes.forEach((m, i) => {
-      tap.noteOn(m, S.velAcc, t0 + i * step);
-      tap.noteOff(m, t0 + i * step + 2.2 * step);
-    });
-    const tc = t0 + notes.length * step + 300;
     [[0, 4, 7], [-5, 0, 4], [-3, 0, 5]].forEach((ch, j) => {
       for (const d of ch) {
-        tap.noteOn(SF.clamp(lo + 12 + d, 21, 108), S.velAcc, tc + j * 700);
-        tap.noteOff(SF.clamp(lo + 12 + d, 21, 108), tc + j * 700 + 600);
+        tap.noteOn(SF.clamp(lo + 12 + d, 21, 108), S.velAcc, t0 + j * 700);
+        tap.noteOff(SF.clamp(lo + 12 + d, 21, 108), t0 + j * 700 + 600);
       }
     });
-    const end = tc + 3 * 700 + 1500;
+    // then a quick run over the range, which teaches it every key
+    const tq = t0 + 3 * 700 + 300;
+    const fast = Math.max(110, Math.min(160, 6000 / notes.length));
+    notes.forEach((m, i) => {
+      tap.noteOn(m, vel, tq + i * fast);
+      tap.noteOff(m, tq + i * fast + 2.2 * fast);
+    });
+    // then each key alone, which measures how much of it is left after cancelling
+    const tr = tq + notes.length * fast + 700;
+    notes.forEach((m, i) => {
+      tap.noteOn(m, vel, tr + i * step);
+      tap.noteOff(m, tr + i * step + 0.82 * step);
+    });
+    const end = tr + notes.length * step + 1200;
     await new Promise((res) => {
       const tick = () => {
         const f = SF.clamp((SF.now() - t0 + 600) / (end - t0 + 600), 0, 1);
@@ -1218,6 +1234,38 @@
     else await refOn();
     updateRefUI();
     updateMicUI();
+  };
+  // "Save the last 40 seconds": both inputs as a two-channel sound file (mic left, the piano's
+  // audio right), with what the app decided about every moment inside it, to tune the filter
+  $('recSave').onclick = async () => {
+    let d;
+    try {
+      d = await listener.dump();
+    } catch (e) {
+      return toast('Turn on the mic (and the piano filter) and sing a little first.');
+    }
+    d.meta.app = { exercise: ex ? ex.name : null, voice: player.cfg.voice, guide: player.cfg.guide, bpm: player.bpm, velAcc: S.velAcc, velSing: S.velSing, grace: S.grace, tol: S.tol, latency: S.latency, mic: listener.micLabel, piano: listener.refLabel, at: new Date().toISOString() };
+    const blob = SF.wavWithData(d.mic, d.ref, d.meta.sr, d.meta);
+    const name = 'scales-feedback-take-' + new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-') + '.wav';
+    try {
+      if (window.showSaveFilePicker) {
+        const h = await window.showSaveFilePicker({ suggestedName: name, startIn: 'downloads', types: [{ description: 'Sound file', accept: { 'audio/wav': ['.wav'] } }] });
+        const w = await h.createWritable();
+        await w.write(blob);
+        await w.close();
+        return toast('Saved ' + esc(h.name) + '.');
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // closed the save box
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('Saved ' + esc(name) + ' to your downloads.');
   };
   $('devReport').onclick = async () => {
     const extra = ['app settings: mic ' + (S.micOn ? 'on' : 'off') + ', piano filter ' + (S.refOn ? 'on' : 'off') + ', output ' + S.output, 'mic line: ' + $('micStatus').textContent, 'piano line: ' + $('refStatus').textContent];

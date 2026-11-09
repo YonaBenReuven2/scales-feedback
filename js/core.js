@@ -52,6 +52,52 @@
 
   // ---------- small numeric helpers ----------
   SF.clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
+
+  /** A two-channel 32-bit float WAV (a left, b right), with data (JSON) in an extra "sfjs"
+   *  chunk that players ignore. */
+  SF.wavWithData = (a, b, sr, data) => {
+    const n = a.length;
+    const json = new TextEncoder().encode(JSON.stringify(data));
+    const jl = json.length + (json.length & 1);
+    const dl = n * 8;
+    const buf = new ArrayBuffer(12 + 26 + 8 + dl + 8 + jl);
+    const v = new DataView(buf);
+    let o = 0;
+    const tag = (s) => {
+      for (let i = 0; i < 4; i++) v.setUint8(o++, s.charCodeAt(i));
+    };
+    const u32 = (x) => {
+      v.setUint32(o, x, true);
+      o += 4;
+    };
+    const u16 = (x) => {
+      v.setUint16(o, x, true);
+      o += 2;
+    };
+    tag('RIFF');
+    u32(buf.byteLength - 8);
+    tag('WAVE');
+    tag('fmt ');
+    u32(18);
+    u16(3); // IEEE float
+    u16(2);
+    u32(sr);
+    u32(sr * 8);
+    u16(8);
+    u16(32);
+    u16(0);
+    tag('data');
+    u32(dl);
+    for (let i = 0; i < n; i++) {
+      v.setFloat32(o, a[i], true);
+      v.setFloat32(o + 4, b ? b[i] : 0, true);
+      o += 8;
+    }
+    tag('sfjs');
+    u32(json.length);
+    new Uint8Array(buf, o, json.length).set(json);
+    return new Blob([buf], { type: 'audio/wav' });
+  };
   SF.median = (arr) => {
     if (!arr.length) return NaN;
     const a = Array.from(arr).sort((x, y) => x - y);

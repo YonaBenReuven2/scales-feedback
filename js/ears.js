@@ -23,6 +23,8 @@
   'use strict';
   const SF = root.SF;
 
+  const RECORD_SEC = 40;
+
   class Ears {
     /** post(message, transfer): where results go. */
     constructor(post) {
@@ -34,6 +36,10 @@
       this.lastLevel = -Infinity;
       this.lastStatus = -Infinity;
       this.lastSave = -Infinity;
+      // the last RECORD_SEC seconds, for "Save the last 40 seconds" (tuning the filter to a room)
+      this.rec = [];
+      this.recFrames = [];
+      this.recPlans = [];
     }
     handle(m) {
       switch (m.type) {
@@ -45,9 +51,18 @@
           for (const e of m.events) this.keys.push(e);
           if (this.keys.length > 512) this.keys.splice(0, this.keys.length - 512);
           return;
-        case 'plan':
+        case 'plan': {
           this.plan = m.plan || { mode: 'stopped' };
+          const j = JSON.stringify(this.plan);
+          if (j !== this.lastPlanJson) {
+            this.lastPlanJson = j;
+            this.recPlans.push([m.at || null, this.plan]);
+            if (this.recPlans.length > 400) this.recPlans.shift();
+          }
           return;
+        }
+        case 'dump':
+          return this.dump();
         case 'gate':
           this.gateDb = m.db;
           if (this.tracker) this.tracker.gateDb = m.db;
@@ -83,6 +98,8 @@
       this.lastEnd = 0;
       this.offsetMs = null;
       this.keys = [];
+      this.rec = [];
+      this.recFrames = [];
       this.running = true;
       this.sendStatus();
     }
@@ -132,7 +149,10 @@
           (events = events || []).push(o);
         }
       }
-      pf.push(a, this.hasRef ? b : null, this.expectQuiet((t0 + t1) / 2), onset, events);
+      const quiet = this.expectQuiet((t0 + t1) / 2);
+      pf.push(a, this.hasRef ? b : null, quiet, onset, events);
+      this.rec.push({ f, a, b, perf: m.perf, ctx: m.ctx, q: quiet ? 1 : 0 });
+      while (this.rec.length && f - this.rec[0].f > RECORD_SEC * this.sr) this.rec.shift();
       // levels for the meters
       let sm = 0;
       let sr2 = 0;
@@ -151,6 +171,9 @@
         const end = this.lastEnd;
         const fr = SF.analyzeFrame(pf, this.tracker, end, this.perfOfFrame(this.pfFrame0 + end - W / 2));
         this.post({ type: 'frame', fr });
+        const r3 = (x) => (x == null ? null : Math.round(x * 1000) / 1000);
+        this.recFrames.push([this.pfFrame0 + end, fr.source, fr.voiced ? r3(fr.midi) : null, fr.why || null, r3(fr.presence), r3(fr.dev), r3(fr.clarity), r3(fr.raw), Math.round(fr.micDb), Math.round(fr.echoDb)]);
+        while (this.recFrames.length && this.pfFrame0 + end - this.recFrames[0][0] > RECORD_SEC * this.sr) this.recFrames.shift();
       }
       const now = m.perf;
       if (now - this.lastLevel > 60) {
@@ -180,8 +203,62 @@
           keys: pf.keysLearned,
           restored: !!pf.restored,
           realigns: pf.realigns || 0,
+          measured: pf.kN.reduce((n, k) => n + (k >= 6 ? 1 : 0), 0), // keys measured on their own
         },
       });
+    }
+    /** The last RECORD_SEC seconds of both inputs, with what was decided about them. */
+    dump() {
+      const rec = this.rec;
+      const n = rec.reduce((k, r) => k + r.a.length, 0);
+      const mic = new Float32Array(n);
+      const ref = new Float32Array(n);
+      let k = 0;
+      const blocks = [];
+      for (const r of rec) {
+        mic.set(r.a, k);
+        if (r.b) ref.set(r.b, k);
+        blocks.push([r.f, Math.round(r.perf * 10) / 10, Math.round(r.ctx * 1e6) / 1e6, r.q]);
+        k += r.a.length;
+      }
+      const pf = this.pf;
+      const st = pf
+        ? {
+            delay: pf.dUsed,
+            ready: pf.ready,
+            cancelDb: pf.cancelDb,
+            lMean: pf.lMean,
+            lVar: pf.lVar,
+            fMean: pf.fMean,
+            fVar: pf.fVar,
+            fCount: pf.fCount,
+            voiceDb: pf.voiceDb,
+            offBy: pf.offBy,
+            realigns: pf.realigns || 0,
+            keyLearn: Array.from(pf.keyLearn),
+            kOff: Array.from(pf.kMean),
+            kN: Array.from(pf.kN),
+            tune: Array.from(pf.tune),
+            tuneN: Array.from(pf.tuneN),
+            room: pf.solved ? pf.exportState() : null,
+          }
+        : null;
+      const meta = {
+        v: 1,
+        sr: this.sr,
+        hasRef: this.hasRef,
+        gateDb: this.gateDb,
+        offsetMs: this.offsetMs,
+        pfFrame0: this.pfFrame0,
+        blocks,
+        frames: this.recFrames.slice(),
+        frameCols: ['frameEnd', 'source', 'midi', 'why', 'presence', 'dev', 'clarity', 'raw', 'micDb', 'echoDb'],
+        keys: this.keys.slice(),
+        plans: this.recPlans.slice(),
+        filter: st,
+      };
+      if (meta.filter && meta.filter.room && meta.filter.room.hc) meta.filter.room.hc = Array.from(meta.filter.room.hc);
+      this.post({ type: 'dump', mic, ref, meta }, [mic.buffer, ref.buffer]);
     }
     sendRoom() {
       const st = this.pf && this.pf.solved ? this.pf.exportState() : null;
@@ -196,7 +273,7 @@
     if (!parts.every((k) => typeof src[k] === 'function')) return null;
     return (
       parts.map((k) => '(' + src[k].toString() + ')(self);').join('\n') +
-      '\nconst ears = new self.SF.Ears((m) => self.postMessage(m));\n' +
+      '\nconst ears = new self.SF.Ears((m, tr) => self.postMessage(m, tr || []));\n' +
       'self.onmessage = (e) => ears.handle(e.data);\n' +
       "self.postMessage({ type: 'hello' });\n"
     );

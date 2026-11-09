@@ -102,6 +102,11 @@ function scene(o) {
   const g = o.voiceDb == null ? 0 : Math.sqrt(pe / Math.max(ve, 1e-12)) * Math.pow(10, o.voiceDb / 20);
   const mic = new Float32Array(ref.length);
   for (let i = 0; i < mic.length; i++) mic[i] = room[i] + g * v[i] + 2e-4 * R.gauss();
+  if (o.agc) {
+    // a mic with its own automatic volume: once the singing starts it turns itself down 10 dB
+    const t0 = sung[0].t;
+    for (let i = 0; i < mic.length; i++) mic[i] *= 1 - 0.68 * SF.clamp((i / sr - t0) / 2, 0, 1);
+  }
   return { ev, sung, ref, mic, cents: o.voiceDb == null ? 0 : o.cents || 0 };
 }
 
@@ -209,4 +214,11 @@ test('in a harder room, the piano alone almost never passes for a voice', () => 
   const r = run(scene({ calib: true, harsh: true, seed: 3 }));
   assert.ok(r.voiced <= 0.03 * r.frames, r.voiced + ' of ' + r.frames + ' frames: ' + JSON.stringify(r.src));
   assert.ok(r.pf.kN.some((n) => n >= 6), 'measured keys on their own in the calibration');
+});
+
+test('a mic that changes its own volume as you sing (Windows effects) is noticed; a room is not', () => {
+  const ok = run(scene({ calib: true, voiceDb: -6, cents: -10 }));
+  assert.ok(ok.pf.micDrift < 7 && ok.pf.recentCancel >= 5, 'steady mic: drift ' + ok.pf.micDrift + ', cancels ' + ok.pf.recentCancel);
+  const r = run(scene({ calib: true, voiceDb: -6, cents: -10, agc: true }));
+  assert.ok(r.pf.micDrift >= 7 || r.pf.recentCancel < 5, 'drift ' + r.pf.micDrift + ', cancels ' + r.pf.recentCancel);
 });

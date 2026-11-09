@@ -65,6 +65,10 @@ How it behaves:
 - **On the very note the piano plays** it comes down to loudness: your voice has to stand out from what the room usually leaves of that key. Once it has, it keeps being heard at a lower level while you hold that pitch.
 - **Loud piano, quiet voice:** when too much of the piano is left for your voice to stand out, the app can't tell whether you sang. Those moments get no verdict rather than *not heard*, and a note mostly made of them gets none either. What helps most is a softer guide (**Your notes touch**) or the piano's volume a little lower, then the mic closer to you than to the piano's speakers, then calibrating again.
 
+**Turn off the mic's own effects.** Laptop microphone arrays (Intel Smart Sound and the like) often adjust their own volume, suppress what they take for noise and aim at your voice, inside Windows, where the browser can't switch it off. The piano then reaches the mic differently from moment to moment, and no filter can keep up: it removes little of the piano and drops your singing. The app notices and says so under *Hear me over the piano*. To fix it: Windows Settings, System, Sound, under Input pick the microphone, set **Audio enhancements** to **Off** (or in More sound settings, Recording, the mic's Properties, tick *Disable all enhancements*). If the laptop has its own audio app (Realtek Audio Console, Dolby, Waves and so on), turn off noise suppression or voice focus there too. Then calibrate again. A plain USB mic avoids all of this.
+
+If it still drops you, sing an exercise and press **Save the last 40 seconds**: the file holds what the mic and the piano's audio heard and what the app decided, for tuning the filter to your room.
+
 If an input won't open, the line under it says why (blocked by the browser, used by another program, unplugged, or no answer). **Copy a device report**, at the end of this section, copies what the browser says about every input, to paste into a message.
 
 ## Making new exercises

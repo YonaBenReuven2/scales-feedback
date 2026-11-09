@@ -204,6 +204,8 @@
           restored: !!pf.restored,
           realigns: pf.realigns || 0,
           measured: pf.kN.reduce((n, k) => n + (k >= 6 ? 1 : 0), 0), // keys measured on their own
+          micDrift: Math.round(pf.micDrift * 10) / 10, // dB the piano's level at the mic moved between chords
+          runCancel: pf.recentCancel == null ? null : Math.round(pf.recentCancel * 10) / 10, // dB removed lately
         },
       });
     }

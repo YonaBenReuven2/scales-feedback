@@ -653,6 +653,61 @@
       this.kN[p] = Math.min(this.kN[p] + 1, 1000);
       this.kMean[p] += (off - this.kMean[p]) / Math.min(this.kN[p], 20);
     }
+    /**
+     * How the piano reaches the mic, stretch by stretch of piano with nobody singing (the
+     * reference chords). A mic that changes its own volume or sound as you sing (Windows'
+     * microphone effects: automatic volume, noise suppression, aiming at the voice) shows as
+     * the same piano arriving much louder or quieter from one chord to the next, and as a
+     * filter that can't remove much of it; no room does that.
+     */
+    trackRuns(end) {
+      const B = this.B;
+      const quiet = this.quietAt(end - 1);
+      const d = Math.round(this.dUsed || 0);
+      let em = 0;
+      let ex = 0;
+      let er = 0;
+      for (let i = end - B; i < end; i++) {
+        const k = i & this.mask;
+        em += this.micR[k] * this.micR[k];
+        er += this.resR[k] * this.resR[k];
+        const x = this.refR[(i - d) & this.mask];
+        ex += x * x;
+      }
+      if (quiet && ex > 1e-8 * B) {
+        const r = this.run || (this.run = { em: 0, ex: 0, er: 0, n: 0, solved: this.solved && !this.offBy });
+        r.em += em;
+        r.ex += ex;
+        r.er += er;
+        r.n++;
+        r.solved = r.solved && this.solved && !this.offBy;
+        return;
+      }
+      if (quiet) return; // the piano is silent: the stretch may go on
+      const r = this.run;
+      this.run = null;
+      if (!r || r.n < 20 || !(r.em > 0) || !(r.ex > 0)) return;
+      const runs = this.runs || (this.runs = []);
+      runs.push({ at: end, levelDb: 10 * Math.log10(r.em / r.ex), cancelDb: r.solved && r.er > 0 ? 10 * Math.log10(r.em / r.er) : null });
+      while (runs.length > 8 || (runs.length && end - runs[0].at > this.sr * 90)) runs.shift();
+    }
+    /** How much the piano's level at the mic moved between recent chords (dB). */
+    get micDrift() {
+      const r = (this.runs || []).slice(-6);
+      if (r.length < 3) return 0;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const x of r) {
+        lo = Math.min(lo, x.levelDb);
+        hi = Math.max(hi, x.levelDb);
+      }
+      return hi - lo;
+    }
+    /** How much of the piano the filter removed over the last few chords (dB), or null. */
+    get recentCancel() {
+      const r = (this.runs || []).filter((x) => x.cancelDb != null).slice(-3);
+      return r.length >= 2 ? SF.median(r.map((x) => x.cancelDb)) : null;
+    }
     /** Keys learned so far (for the UI). */
     get keysLearned() {
       let n = 0;
@@ -923,6 +978,7 @@
       const sr = this.sr;
       const B = this.B;
       const Lw = this.room.Lw;
+      this.trackRuns(end);
       if (this.solved && !this.offBy && this.quietAt(end - 1) && this.quietAt(end - B) && !this.unlearnedAt(end, B)) {
         let ee = 0;
         let er = 0;
@@ -1005,6 +1061,8 @@
       this.keyLearn.fill(0);
       this.fCount = 0;
       this.kN.fill(0);
+      this.runs = [];
+      this.run = null;
       this.vref = null;
       this.restored = false;
       this.alignPos = this.n;

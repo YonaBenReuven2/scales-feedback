@@ -439,6 +439,10 @@
       : 'No samples in this browser.';
     $('removeSamples').disabled = !bank;
   }
+  let micEffectsTold = false;
+  /** The piano's level at the mic jumps between chords, or little of it can be removed: a mic
+   *  with its own automatic volume or noise suppression (Windows' effects), not the room. */
+  const micEffects = (f) => !!(f && f.ready && (f.micDrift >= 7 || (f.runCancel != null && f.runCancel < 5)));
   function updateRefUI() {
     $('refOn').checked = !!S.refOn;
     $('refBox').hidden = !S.refOn;
@@ -459,6 +463,14 @@
       // calibrating measures how much of each key is left; without that it is careful on the
       // very note the piano plays, and hears you there less readily
       if (!f.measured) st += ' Calibrate again: it now measures each key, which lets it hear you better on the notes the piano plays.';
+      // the mic changing its own sound (Windows' microphone effects) defeats any filter
+      if (micEffects(f)) {
+        st = 'Your mic is changing its own sound as you sing (its Windows effects), so the piano can’t be removed well. In Windows, Sound settings, Input, ' + (listener.micLabel || 'your mic') + ', set Audio enhancements to Off; then calibrate again. ' + st;
+        if (!micEffectsTold) {
+          micEffectsTold = true;
+          toast('Your mic is changing its own sound as you sing, so the piano filter can’t keep up. Settings, Hear me over the piano, says how to turn that off.', 8000);
+        }
+      }
     }
     $('refStatus').textContent = st;
     $('refStatus').className = 'status' + (f && f.ready ? ' ok' : '');

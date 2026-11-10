@@ -78,6 +78,15 @@ canvas.tall { height: 220px; }
 .players button { text-align: left; display: flex; justify-content: space-between; gap: 12px; }
 .players button small { color: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; }
+.seg { justify-self: start; display: inline-flex; background: var(--ink-deep); border: 1px solid var(--line); border-radius: var(--radius); padding: 2px; gap: 2px; }
+.seg button { border: 1px solid transparent; background: none; padding: 5px 10px; border-radius: 6px; color: var(--muted); }
+.seg button[aria-pressed='true'] { background: var(--panel-2); border-color: var(--line); color: var(--text); }
+/* how much of each note it heard, low to high */
+.by-note { display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 6px; margin: 0 0 12px; }
+.by-note div { background: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 13px; }
+.by-note b { display: block; font-size: 17px; font-weight: 600; }
+.by-note i { display: block; height: 4px; border-radius: 2px; background: var(--ink-deep); margin-top: 5px; overflow: hidden; }
+.by-note i span { display: block; height: 100%; background: var(--hit); }
 @media (max-width: 520px) { .dev { grid-template-columns: 1fr; } .lvl { grid-column: 1; } }
 </style>
 </head>
@@ -87,33 +96,39 @@ canvas.tall { height: 220px; }
     <h1>Filter lab</h1>
     <a href="./">Back to the app</a>
   </header>
-  <p class="lead">Tests the piano filter on your piano, mic and room. The piano plays a calibration while you stay quiet, then a short exercise to sing along to, with the piano playing your notes. Afterwards you can listen to what the filter left behind: it should sound like just your voice.</p>
+  <p class="lead">Tests the filter on your mic and room, with the piano or with the app’s own sound (the samples or the built-in synth) through your speakers. It plays a calibration while you stay quiet, then an exercise to sing along to, playing your notes too. Afterwards you can listen to what the filter left behind: it should sound like just your voice.</p>
 
   <section>
-    <h2>Inputs</h2>
+    <h2>Sound and inputs</h2>
+    <div class="dev"><span>Plays on</span><div class="seg" id="outSeg" role="group" aria-label="What plays the notes"><button data-out="midi" aria-pressed="true">The piano</button><button data-out="samples" aria-pressed="false">Samples</button><button data-out="synth" aria-pressed="false">Built-in synth</button></div></div>
     <div class="dev"><label for="micSel">Microphone</label><select id="micSel"></select><div class="lvl" aria-hidden="true"><i id="micLvl"></i></div></div>
-    <div class="dev"><label for="refSel">The piano’s USB audio</label><select id="refSel"></select><div class="lvl" aria-hidden="true"><i id="refLvl"></i></div></div>
-    <div class="dev"><span>The piano (MIDI)</span><span id="midiName">Not connected</span></div>
-    <div class="row"><button id="connectBtn">Connect</button><span class="hint">Opens the mic, the piano’s audio and the piano itself.</span></div>
+    <div class="dev piano-only"><label for="refSel">The piano’s USB audio</label><select id="refSel"></select><div class="lvl" aria-hidden="true"><i id="refLvl"></i></div></div>
+    <div class="dev piano-only"><span>The piano (MIDI)</span><span id="midiName">Not connected</span></div>
+    <div class="dev app-only" hidden><span>What it removes</span><span id="appName">The app’s own sound, as it goes to the speakers</span></div>
+    <div class="row"><button id="connectBtn">Connect</button><span class="hint" id="connectHint">Opens the mic, the piano’s audio and the piano itself.</span></div>
     <p id="devStatus" class="status"></p>
   </section>
 
   <section>
     <h2>Test</h2>
     <div class="row">
-      <label class="field">Lowest note <input id="loNote" type="text" value="E2"></label>
-      <label class="field">Highest note <input id="hiNote" type="text" value="A4"></label>
-      <label class="field">Sing from <input id="fromNote" type="text" value="E3"></label>
+      <label class="field">First note to sing <input id="firstNote" type="text" value="E3"></label>
+      <label class="field">Last note to sing <input id="lastNote" type="text" value="C3"></label>
     </div>
-    <p class="hint">The calibration covers your lowest to highest note. You sing do re mi re do from the “Sing from” note, then a semitone lower, then a whole tone lower: try a low one, like B2, to see how it does down there.</p>
+    <p class="hint">You sing do re mi re do on each key from the first note to the last, a whole tone apart (closer when they are close): E3 to C3 is three keys; E2 to E4, to try the whole range, is thirteen. <span id="estimate"></span></p>
     <div class="row">
-      <label class="field"><input id="guideOn" type="checkbox" checked> Play my notes on the piano</label>
+      <label class="field">Calibrate from <input id="loNote" type="text" value="E2"></label>
+      <label class="field">to <input id="hiNote" type="text" value="A4"></label>
+    </div>
+    <p class="hint">The calibration covers these notes, and always every note the exercise plays.</p>
+    <div class="row">
+      <label class="field"><input id="guideOn" type="checkbox" checked> Play the notes I sing too</label>
     </div>
     <div class="row" style="margin-top:10px">
       <label class="field" style="flex:1;min-width:200px">Chord touch <input id="velAcc" type="range" min="1" max="127" value="50"><span id="velAccV">50</span></label>
       <label class="field" style="flex:1;min-width:200px">Your notes touch <input id="velSing" type="range" min="1" max="127" value="62"><span id="velSingV">62</span></label>
     </div>
-    <div class="row" style="margin-top:14px"><button id="runBtn" class="main">Run the test</button><span class="hint">About 40 seconds. Sing as you normally would, without headphones.</span></div>
+    <div class="row" style="margin-top:14px"><button id="runBtn" class="main">Run the test</button><span class="hint" id="runHint">Sing as you normally would, without headphones.</span></div>
     <p id="phase" class="big" hidden></p>
     <div class="prog" id="progBox" hidden><i id="prog"></i></div>
     <p id="runStatus" class="status"></p>
@@ -124,13 +139,14 @@ canvas.tall { height: 220px; }
   <section id="results" hidden>
     <h2>What the filter did</h2>
     <div class="nums">
-      <div class="num"><b id="nDelay">–</b><span>Delay from the piano’s audio to the mic</span></div>
+      <div class="num"><b id="nDelay">–</b><span id="nDelayNote">Delay from the piano’s audio to the mic</span></div>
       <div class="num"><b id="nCal">–</b><span id="nCalNote">Piano removed while you were quiet</span></div>
       <div class="num"><b id="nSing">–</b><span>Of your sung notes it could hear</span></div>
-      <div class="num"><b id="nVoice">–</b><span>Your voice against the piano playing your notes, at the mic (above 0: you were louder)</span></div>
+      <div class="num"><b id="nVoice">–</b><span id="nVoiceNote">Your voice against the piano playing your notes, at the mic (above 0: you were louder)</span></div>
     </div>
     <p id="verdict"></p>
     <h3>What it heard you sing</h3>
+    <div id="byNote" class="by-note"></div>
     <canvas id="pitchChart" class="tall" width="1400" height="440" aria-label="Pitch over time: the notes to sing, and the pitch the app heard"></canvas>
     <div class="legend"><span><i style="background:#2c4a73;height:10px"></i>The notes to sing</span><span><b class="dot" style="background:#5bd69b"></b><b class="dot" style="background:#f2c14e"></b><b class="dot" style="background:#f07a6a"></b>Heard as you: on pitch, close, off</span><span><b class="dot ring"></b>A pitch it read but couldn’t tell from the piano</span></div>
     <h3>Level over time</h3>
@@ -141,19 +157,20 @@ canvas.tall { height: 220px; }
       <button data-track="mic">The mic <small>the piano and you, as the room heard it</small></button>
       <button data-track="post">What’s left <small>after removing the piano: should be mostly your voice</small></button>
       <button data-track="res">Before the clean-up <small>what the room filter alone leaves</small></button>
-      <button data-track="echo">The piano, as the filter predicts the mic hears it <small>what it removes</small></button>
-      <button data-track="ref">The piano’s own audio <small>from the USB cable</small></button>
+      <button data-track="echo"><span id="echoLabel">The piano, as the filter predicts the mic hears it</span> <small>what it removes</small></button>
+      <button data-track="ref"><span id="refLabel">The piano’s own audio</span> <small id="refSmall">from the USB cable</small></button>
     </div>
     <div class="row" style="margin-top:14px"><button id="saveBtn">Save the recording</button><span class="hint">A sound file of both inputs with what the app decided, to send for tuning the filter.</span></div>
   </section>
 </main>
-<script src="js/core.js?v=12"></script>
-<script src="js/pitch.js?v=12"></script>
-<script src="js/echo.js?v=12"></script>
-<script src="js/ears.js?v=12"></script>
-<script src="js/outputs.js?v=12"></script>
-<script src="js/listen.js?v=12"></script>
-<script src="js/lab.js?v=12"></script>
-<script src="js/pwa.js?v=12"></script>
+<script src="js/core.js?v=13"></script>
+<script src="js/pitch.js?v=13"></script>
+<script src="js/echo.js?v=13"></script>
+<script src="js/ears.js?v=13"></script>
+<script src="js/outputs.js?v=13"></script>
+<script src="js/samples.js?v=13"></script>
+<script src="js/listen.js?v=13"></script>
+<script src="js/lab.js?v=13"></script>
+<script src="js/pwa.js?v=13"></script>
 </body>
 </html>

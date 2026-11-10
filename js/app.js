@@ -23,7 +23,14 @@
     ahead: 3,
     labels: 'solfege',
     hist: true,
-    fullKb: false,
+    kbView: 'fit', // the keyboard shows the exercise ('fit'), all 88 keys ('all'), or kbWhites white keys ('zoom')
+    kbWhites: 22,
+    kbFrac: null, // the keyboard's height and the strip's under it, as dragged (null: automatic)
+    histFrac: null,
+    feedback: 'all', // while singing show how you're doing ('all'), only where you sing ('where'), or nothing ('none')
+    boxPlace: 'right', // the box: on the right, or out of the way of the notes ('move')
+    metro: false,
+    metroVol: 70,
     pedal: false,
     micOn: false,
     micId: null,
@@ -32,14 +39,19 @@
     octFree: false,
     latency: 30,
     grace: 120, // ms not judged at each end of a note
-    refOn: false,
+    refOn: false, // hear me over the piano: the filter is set up
     refId: null,
+    filterGuide: true, // and used while the piano plays your notes
+    filterChord: false, // and in Chord only (nothing plays while you sing)
     lastEx: null,
     bpmByEx: {},
     voiceByEx: {},
     rolesByEx: {},
   };
-  const S = Object.assign({}, DEFAULTS, SF.store.get('settings', {}));
+  const stored = SF.store.get('settings', {});
+  const S = Object.assign({}, DEFAULTS, stored);
+  if (stored.fullKb && !stored.kbView) S.kbView = 'all'; // the old "Full 88-key keyboard"
+  delete S.fullKb;
   const save = () => SF.store.set('settings', S);
 
   // ---------------------------------------------------------------- objects
@@ -54,16 +66,24 @@
     hi: S.rangeHi,
     preroll: S.preroll,
   });
-  const scorer = new SF.Scorer(player, { tolerance: S.tol, octaveFree: S.octFree, latency: S.latency, grace: S.grace / 1000, endGrace: S.grace / 1000 });
+  // the metronome: a click with no pitch, and the frames it drowns out aren't judged
+  const metronome = new SF.Metronome();
+  metronome.setVolume(S.metroVol / 100);
+  const scorer = new SF.Scorer(player, { tolerance: S.tol, octaveFree: S.octFree, latency: S.latency, grace: S.grace / 1000, endGrace: S.grace / 1000, clickNear: (t) => metronome.clickedNear(t) });
   const renderer = new SF.Renderer($('cv'), player, scorer);
-  renderer.set({ lookahead: S.ahead, history: S.hist, labels: S.labels, full: S.fullKb });
+  renderer.set({ lookahead: S.ahead, history: S.hist, labels: S.labels, view: S.kbView, whites: S.kbWhites, kbFrac: S.kbFrac, histFrac: S.histFrac, feedback: S.feedback, beats: S.metro });
+  if (S.metro) player.setMetronome(metronome);
   const midi = new SF.Midi();
   const synth = new SF.Synth();
   const listener = new SF.Listener();
   listener.setGate(S.gate);
+  // the filter: used in Play my notes, off in Chord only unless turned on there
+  const filterWanted = () => !!(player.cfg.guide ? S.filterGuide : S.filterChord);
+  listener.setFilterUse(filterWanted());
   const library = new SF.Library();
   let bank = null;
   let ex = null;
+  const held = new Set(); // keys held down on the screen
   let calibrating = false;
   let wakeLock = null;
 
@@ -79,11 +99,25 @@
     if (!sp || sp.bank !== bank) sp = new SF.SamplePlayer(bank);
     return sp;
   }
+  let tapOut = null; // the output, telling the filter every key it plays
   function applyOutput() {
     const out = currentOutput();
-    player.setOutput(SF.tapOutput(out, (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now())));
+    if (!tapOut || tapOut.inner !== out) {
+      tapOut = SF.tapOutput(out, (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now()));
+      player.setOutput(tapOut);
+    }
     if (out.kind === 'samples' && ex) bank.prepare(ex.notes.map((n) => n.pitch));
     updateOutputUI();
+    syncRef();
+    updateRefUI(); // (what the filter takes follows what plays)
+  }
+  /** The filter takes the piano's USB audio when the piano plays, the app's own sound otherwise. */
+  let refKindNow = null;
+  function syncRef() {
+    const app = currentOutput().kind !== 'midi';
+    if (refKindNow === app) return;
+    refKindNow = app;
+    if (S.refOn && listener.running) refOn(true);
   }
   function refreshMidi() {
     const port = midi.preferred(S.midiPort);
@@ -114,6 +148,7 @@
   midi.on('key', (k) => {
     if (k.on) renderer.inputKeys.set(k.pitch, true);
     else renderer.inputKeys.delete(k.pitch);
+    lastKeyAt = SF.now();
   });
   let pedalDown = false;
   midi.on('cc', ({ cc, value }) => {
@@ -124,6 +159,23 @@
   });
 
   // ---------------------------------------------------------------- the ears
+  /** Could this pitch be the piano (or the app) itself, with nothing filtering it out? */
+  let lastKeyAt = -1e9;
+  function pianoHeard(fr) {
+    if (fr.why) return false; // the filter heard it as the voice
+    const f = listener.filter;
+    if (f && f.noEcho) return false; // the mic doesn't hear the piano (headphones)
+    const t = fr.t - S.latency;
+    if (held.size || renderer.inputKeys.size || t - lastKeyAt < 600) return true;
+    const P = player.positionAt(t);
+    if (P == null || !ex) return false;
+    const tail = 0.4 * player.speed; // a note still rings a moment after it ends
+    let on = false;
+    player.forNotes(P - tail, P + 1e-4, (n, seg, P0, P1) => {
+      if (!on && player.audible(n) && P0 <= P && P1 > P - tail) on = true;
+    });
+    return on;
+  }
   // When singing is expected, as page times: the piano filter learns only outside these.
   listener.planner = () => {
     if (calibrating) return { mode: 'calib' };
@@ -143,6 +195,8 @@
   let unsureTold = false;
   listener.on('frame', (fr) => {
     scorer.frame(fr);
+    // where you sing, also between notes, while paused, with no exercise: never the piano's own sound
+    if (fr.voiced && fr.midi != null && !pianoHeard(fr)) renderer.free = { midi: fr.midi, at: SF.now() };
     // notes the piano filter can't judge aren't scored: say why, once each
     if (!scorer.live.listening) return;
     if (fr.source === 'learning' && !learningTold && ++learningFrames > 60) {
@@ -164,7 +218,8 @@
   listener.on('room', (st) => {
     if (st) SF.idb.put('kv', roomKey(), st).catch(() => {});
   });
-  const roomKey = () => 'room:' + (listener.refLabel || '') + '|' + (listener.micLabel || '') + '|' + (listener.sr || '');
+  // what was learned, per reference (the piano's audio, or the app's own sound), mic and rate
+  const roomKey = () => 'room:' + (listener.refApp ? 'app' : listener.refLabel || '') + '|' + (listener.micLabel || '') + '|' + (listener.sr || '');
 
   // Opening inputs one at a time: a second request while the browser's prompt is up
   // would otherwise race the first.
@@ -223,7 +278,24 @@
   }
   async function openRef(quiet) {
     refNote = '';
+    // synth or samples: the filter takes the app's own sound, nothing to open
+    const app = currentOutput().kind !== 'midi';
+    refKindNow = app;
+    if (app) {
+      try {
+        await listener.setAppReference(true);
+        await offerSavedRoom();
+      } catch (e) {
+        refNote = 'Could not start the filter: ' + (e && e.message ? e.message : e);
+      }
+      save();
+      updateRefUI();
+      updateMicUI();
+      return;
+    }
     try {
+      // the piano: its USB audio, not the app's sound (which has nothing of it)
+      if (listener.refApp) await listener.setAppReference(false);
       // the input picked before, if it's still there; else whatever looks like the piano
       const ds = await listener.devices();
       const named = ds.filter((d) => d.label);
@@ -250,8 +322,8 @@
       const id = (S.refId && named.some((d) => d.id === S.refId && d.id !== listener.micId) && S.refId) || (named.find((d) => d.piano && d.id !== listener.micId) || {}).id || null;
       if (!id) {
         await listener.setReference(null);
-        refNote = named.length ? 'The piano’s USB audio isn’t in the list. Is the piano on and connected by USB? Or pick its input in the list above.' : 'Pick the piano’s USB audio in the list above.';
-        if (!quiet) toast('Pick the piano’s USB audio in Settings, under Hear me over the piano.');
+        refNote = named.length ? 'The piano’s USB audio isn’t in the list. Is the piano on and connected by USB? Or pick its input under Sound, Piano.' : 'Pick the piano’s USB audio under Sound, Piano.';
+        if (!quiet) toast('Pick the piano’s USB audio in Settings, under Sound, Piano.');
         await fillDevices();
         updateRefUI();
         return;
@@ -285,6 +357,7 @@
     updateMicUI();
     updateRefUI();
   });
+  listener.on('state', () => updateFilterUI());
   listener.on('lost', (which) => {
     if (which === 'mic') {
       listener.stop();
@@ -299,7 +372,7 @@
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener('devicechange', async () => {
       await fillDevices();
-      if (S.refOn && listener.running && !listener.refStream) {
+      if (S.refOn && listener.running && !listener.refStream && currentOutput().kind === 'midi') {
         const ds = await listener.devices();
         if (ds.some((d) => d.label && (d.id === S.refId || d.piano) && d.id !== listener.micId)) refOn(true);
       }
@@ -325,13 +398,24 @@
     save();
     $('empty').hidden = true;
     buildExerciseUI();
+    updatePlayUI(); // a new exercise starts paused, whatever was playing
+    boxRound = -2;
     closeDrawers();
   }
+  /** The run just saved, to show in the results until the next one starts. */
+  let lastRun = null;
   function endSession() {
     if (ex && scorer.session.rounds.length) {
       SF.History.add(ex.id, scorer.session, { bpm: Math.round(player.bpm), voice: player.cfg.voice, guide: player.cfg.guide, tol: S.tol });
-      scorer.session = { started: Date.now(), rounds: [] };
+      lastRun = { ex: ex.id, notes: scorer.session.notes, rounds: latestPerKey(scorer.session.rounds), started: scorer.session.started, bpm: Math.round(player.bpm) };
+      scorer.session = { started: Date.now(), rounds: [], notes: [] };
     }
+  }
+  /** Each key's latest result, in the exercise's order. */
+  function latestPerKey(rounds) {
+    const m = new Map();
+    for (const r of rounds) m.set(r.r, r);
+    return [...m.values()].sort((a, b) => a.r - b.r);
   }
   player.on('ended', () => {
     endSession();
@@ -347,11 +431,12 @@
   scorer.on('note', ({ note, res }) => renderer.verdict(note, res));
   scorer.on('round', (r) => {
     updateKeyStrip();
+    if ($('res').classList.contains('open')) renderResults();
+    if (S.feedback !== 'all') return; // how it went waits for the end
     const parts = [r.hit + ' of ' + r.n + ' in tune'];
     if (r.cents != null && Math.abs(r.cents) >= 5) parts.push(Math.abs(Math.round(r.cents)) + '¢ ' + (r.cents < 0 ? 'flat' : 'sharp') + ' on average');
     if (r.silent) parts.push(r.silent + ' not heard');
     toast('<span class="big">' + esc(r.label) + '</span><br>' + esc(parts.join(', ')), 2600);
-    if ($('res').classList.contains('open')) renderResults();
   });
 
   // ---------------------------------------------------------------- transport
@@ -395,7 +480,7 @@
     $('micBtn').setAttribute('aria-pressed', String(listener.running));
     $('micBtn').classList.toggle('live', listener.running);
     $('micBtn').title = listener.running ? 'Listening with ' + (listener.micLabel || 'the mic') + ' (M)' : 'Turn the mic on (M)';
-    $('micLabel').textContent = listener.phase === 'asking' ? 'Allow the mic' : listener.running ? (listener.refStream ? 'Mic, piano filtered' : 'Mic on') : 'Mic off';
+    $('micLabel').textContent = listener.phase === 'asking' ? 'Allow the mic' : listener.running ? 'Mic on' : 'Mic off';
     if (!listener.running) $('micMeter').style.width = '0';
     $('micWarn').hidden = !listener.warning;
     $('micWarn').textContent = listener.warning;
@@ -418,6 +503,10 @@
     $('outLabel').textContent = label.length > 18 ? label.slice(0, 17) + '…' : label;
     $('outDot').className = 'dot ' + (out.kind === 'midi' ? 'ok' : out.kind === 'samples' ? 'ok' : '');
     for (const b of $('outSeg').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.out === S.output));
+    // what there is to set for each: the piano's MIDI and USB audio, the samples, the synth
+    $('pianoBox').hidden = S.output !== 'midi';
+    $('samplesBox').hidden = S.output !== 'samples';
+    $('synthBox').hidden = S.output !== 'synth';
     let st = '';
     if (S.output === 'midi' && !midiOut) st = midi.error || (midi.access ? 'No piano found. Check the USB cable and that the piano is on.' : 'Press Piano to connect over MIDI.');
     else if (S.output === 'midi') st = 'Playing on ' + midiOut.name + '.';
@@ -444,20 +533,28 @@
    *  with its own automatic volume or noise suppression (Windows' effects), not the room. */
   const micEffects = (f) => !!(f && f.ready && (f.micDrift >= 7 || (f.measured > 0 && f.runCancel != null && f.runCancel < 5)));
   function updateRefUI() {
+    const app = currentOutput().kind !== 'midi';
+    const what = app ? 'the app’s sound' : 'the piano';
     $('refOn').checked = !!S.refOn;
     $('refBox').hidden = !S.refOn;
+    $('filterGuide').checked = !!S.filterGuide;
+    $('filterChord').checked = !!S.filterChord;
+    $('refWhat').textContent = app
+      ? 'With the ' + (currentOutput().kind === 'samples' ? 'samples' : 'built-in synth') + ' it takes the app’s own sound, which it knows exactly: nothing to connect.'
+      : 'With the piano it takes the piano’s USB audio (under Sound, Piano).';
     const f = listener.filter;
     let st;
-    if (!S.refOn) st = namesHidden ? 'Off. Press Ask Chrome for the piano’s input to turn it on.' : pianoFound ? 'Off. Pick ' + pianoFound + ' in the list above to turn it on.' : 'Off. Picking the piano’s input above turns it on.';
-    else if (listener.phase === 'asking-ref') st = 'Chrome is asking again, this time for the piano: in its box choose Line (P-Series), then Allow.';
+    if (!S.refOn) st = 'Off. Turn it on to sing along to ' + what + ' without headphones.';
+    else if (!app && listener.phase === 'asking-ref') st = 'Chrome is asking again, this time for the piano: in its box choose Line (P-Series), then Allow.';
     else if (listener.phase === 'opening' && listener.running) st = 'Opening ' + listener.phaseName + '…';
     else if (!listener.running) st = listener.phase ? 'Waiting for the microphone first.' : 'Starts when the microphone is on.';
     else if (refNote) st = refNote;
-    else if (!f) st = 'Not connected to the piano audio.';
-    else if (f.delayMs == null) st = 'Measuring how late the piano reaches the mic, from the chords. To start at once, press Calibrate (15 to 20 seconds, stay quiet).';
+    else if (!f) st = app ? 'Starting…' : 'Not connected to the piano’s audio: pick it under Sound, Piano.';
+    else if (f.noEcho) st = 'The mic doesn’t hear ' + what + ' (headphones on?), so there is nothing to remove: it listens to the mic as it is.';
+    else if (f.delayMs == null) st = 'Measuring how late ' + what + ' reaches the mic, from the chords. To start at once, press Calibrate (15 to 20 seconds, stay quiet).';
     else if (!f.ready) st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Learning the room from the chords, or press Calibrate.';
     else {
-      st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Removes about ' + Math.round(f.cancelDb) + ' dB of the piano' + (f.restored ? ' (remembered from last time)' : '') + '. ';
+      st = 'Delay ' + f.delayMs.toFixed(1) + ' ms. Removes about ' + Math.round(f.cancelDb) + ' dB of ' + what + (f.restored ? ' (remembered from last time)' : '') + '. ';
       const need = ex ? ex.hi - ex.lo + 1 : 37;
       st += f.keys >= need ? 'Knows ' + f.keys + ' keys.' : 'Knows ' + f.keys + (f.keys === 1 ? ' key' : ' keys') + ' so far: calibrate to learn the rest.';
       // calibrating measures how much of each key is left; without that it is careful on the
@@ -465,18 +562,90 @@
       if (!f.measured) st += ' Calibrate again: it now measures each key, which lets it hear you better on the notes the piano plays.';
       // the mic changing its own sound (Windows' microphone effects) defeats any filter
       if (micEffects(f)) {
-        st = 'Your mic is changing its own sound as you sing (its Windows effects), so the piano can’t be removed well. In Windows, Sound settings, Input, ' + (listener.micLabel || 'your mic') + ', set Audio enhancements to Off; then calibrate again. ' + st;
+        st = 'Your mic is changing its own sound as you sing (its Windows effects), so ' + what + ' can’t be removed well. In Windows, Sound settings, Input, ' + (listener.micLabel || 'your mic') + ', set Audio enhancements to Off; then calibrate again. ' + st;
         if (!micEffectsTold) {
           micEffectsTold = true;
-          toast('Your mic is changing its own sound as you sing, so the piano filter can’t keep up. Settings, Hear me over the piano, says how to turn that off.', 8000);
+          toast('Your mic is changing its own sound as you sing, so the filter can’t keep up. Settings, Hear me over the piano, says how to turn that off.', 8000);
         }
       }
     }
+    if (S.refOn && listener.running && !filterWanted()) st = 'Not in use in ' + (player.cfg.guide ? 'Play my notes' : 'Chord only') + ' (the Filter button at the top turns it on there): the mic is heard as it is. ' + st;
     $('refStatus').textContent = st;
-    $('refStatus').className = 'status' + (f && f.ready ? ' ok' : '');
-    $('calibBtn').disabled = !(listener.running && listener.refStream);
+    $('refStatus').className = 'status' + (f && f.ready && filterWanted() ? ' ok' : '');
+    $('calibBtn').disabled = !(listener.running && listener.hasRef);
+    // the piano's USB audio, under Sound, Piano
+    let pi = '';
+    if (listener.refStream) pi = 'Open: ' + listener.refLabel + '.';
+    else if (!listener.running) pi = namesHidden || !pianoFound ? 'Turn the mic on to see the inputs.' : 'Found ' + pianoFound + '.';
+    else if (namesHidden) pi = 'The browser hides the inputs: press Ask Chrome for the piano’s input.';
+    else if (pianoFound) pi = 'Found ' + pianoFound + (S.refOn && !app ? '.' : ': picking it turns the filter on.');
+    else pi = 'Not in the list. Is the piano on and connected by USB?';
+    if (!app && S.refOn && refNote) pi = refNote;
+    $('refInStatus').textContent = pi;
+    $('refInStatus').className = 'status' + (listener.refStream ? ' ok' : '');
     $('refAsk').hidden = !namesHidden || !!listener.refStream;
     $('fileHint').hidden = !(namesHidden && location.protocol === 'file:');
+    updateFilterUI();
+  }
+  /** The Filter button at the top: on or off for this mode (Play my notes, Chord only), and how it's doing. */
+  function updateFilterUI() {
+    const b = $('filterBtn');
+    if (!b) return;
+    const app = currentOutput().kind !== 'midi';
+    const what = app ? 'the app’s sound' : 'the piano';
+    const on = !!(S.refOn && filterWanted());
+    const f = listener.filter;
+    let dot = '';
+    let title;
+    if (!S.refOn) title = 'Filter off: press to take ' + what + ' out of what the mic hears, to sing without headphones (F)';
+    else if (!on) title = player.cfg.guide ? 'Filter off in Play my notes: the mic hears everything (F)' : 'Filter off in Chord only: nothing plays while you sing. Press to use it here too (F)';
+    else if (!listener.running) {
+      dot = 'warn';
+      title = 'Filter on: starts with the mic (F)';
+    } else if (!f) {
+      dot = 'warn';
+      title = refNote || 'Filter on: connecting to ' + what + ' (F)';
+    } else if (f.noEcho) {
+      dot = 'ok';
+      title = 'Filter on, with nothing to remove: the mic doesn’t hear ' + what + ' (F)';
+    } else if (!f.ready) {
+      dot = 'warn';
+      title = 'Filter on, still learning ' + what + '. Calibrate under Settings to start at once (F)';
+    } else {
+      dot = 'ok';
+      title = 'Filter on: removes about ' + Math.round(f.cancelDb) + ' dB of ' + what + ' from the mic (F)';
+    }
+    b.setAttribute('aria-pressed', String(on));
+    $('filterDot').className = 'dot ' + dot;
+    b.title = title;
+  }
+  /** Use the filter in this mode or not; set up the filter first if it isn't. */
+  async function toggleFilter() {
+    const k = player.cfg.guide ? 'filterGuide' : 'filterChord';
+    if (!S.refOn) {
+      S.refOn = true;
+      S[k] = true;
+    } else S[k] = !S[k];
+    save();
+    listener.setFilterUse(filterWanted());
+    updateFilterUI();
+    // (with the mic off, it starts with the mic)
+    if (S.refOn && S[k] && listener.running && !listener.hasRef) await refOn();
+    toast(filterWanted() ? 'Filter on in ' + modeName() + '.' : 'Filter off in ' + modeName() + ': the mic hears everything.');
+    updateRefUI();
+  }
+  const modeName = () => (player.cfg.guide ? 'Play my notes' : 'Chord only');
+  function updateMetroUI() {
+    $('metroBtn').setAttribute('aria-pressed', String(!!S.metro));
+    $('metroBtn').title = (S.metro ? 'Metronome on' : 'Metronome') + ': clicks on the beat of the exercise (K)';
+  }
+  function setMetro(on) {
+    S.metro = !!on;
+    save();
+    if (S.metro) SF.audio.resume();
+    player.setMetronome(S.metro ? metronome : null);
+    renderer.set({ beats: S.metro });
+    updateMetroUI();
   }
 
   // ---------------------------------------------------------------- UI: exercise
@@ -591,7 +760,7 @@
       const r = +b.dataset.r;
       const res = scorer.byRound.get(r);
       let cls = '';
-      if (res) cls = res.score >= 0.85 ? 's-hit' : res.score >= 0.6 ? 's-close' : 's-off';
+      if (res && S.feedback === 'all') cls = res.score >= 0.85 ? 's-hit' : res.score >= 0.6 ? 's-close' : 's-off';
       b.className = (r === cur ? 'cur ' : '') + cls + (player.cfg.skip && !player.eligible(r) ? ' out-of-range' : '');
     }
     if ((scroll || cur !== lastCur) && buttons[cur]) buttons[cur].scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -609,6 +778,9 @@
     }
     if (now - hudAt < 120) return;
     hudAt = now;
+    if (S.refOn && $('set').classList.contains('open')) updateRefUI();
+    else updateFilterUI();
+    placeBox();
     if (!ex) {
       $('hudKey').textContent = '';
       $('hudInfo').textContent = '';
@@ -627,12 +799,47 @@
     if (player.cfg.subset && player.cfg.subset.length) info += ', weak keys only';
     $('hudInfo').textContent = info;
     if (r !== lastCur) updateKeyStrip();
-    if (S.refOn && $('set').classList.contains('open')) updateRefUI();
+  }
+
+  // ---------------------------------------------------------------- the box
+  // On the right; or, if you like, out of the way of the notes: decided once per key, so
+  // it doesn't jump about, and on the right whenever the left is no better.
+  let boxRound = -2;
+  function placeBox(force) {
+    const tuner = $('tuner');
+    const show = S.feedback === 'all';
+    tuner.hidden = !show;
+    if (!show) return;
+    const r = ex ? player.currentRound() : -1;
+    if (!force && r === boxRound) return;
+    boxRound = r;
+    let side = 'right';
+    if (S.boxPlace === 'move' && ex && ex.rounds[r]) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const n of ex.rounds[r].notes) {
+        lo = Math.min(lo, n.pitch);
+        hi = Math.max(hi, n.pitch);
+      }
+      const W = renderer.W;
+      const bw = tuner.offsetWidth || 250;
+      const a = renderer.xOf(lo) - renderer.sxTarget - renderer.ww;
+      const b = renderer.xOf(hi) - renderer.sxTarget + renderer.ww;
+      const covers = (x0, x1) => b > x0 && a < x1;
+      if (covers(W - 18 - bw, W - 18) && !covers(18, 18 + bw)) side = 'left';
+    }
+    if (side === 'left') {
+      const W = $('stage').clientWidth;
+      const top = $('hudLeft').offsetHeight + 10;
+      tuner.style.transform = 'translate(' + -(W - tuner.offsetWidth - 36) + 'px,' + top + 'px)';
+    } else tuner.style.transform = '';
+    tuner.dataset.side = side;
   }
 
   /** The big readout of what you are singing. */
   let zonesTol = null;
   function updateTuner() {
+    if (S.feedback !== 'all') return;
     const lv = scorer.live;
     const tuner = $('tuner');
     if (zonesTol !== S.tol) {
@@ -673,13 +880,13 @@
       }
       stateTxt =
         lv.source === 'learning'
-          ? 'Learning the piano, not scoring yet'
+          ? 'Learning, not scored yet'
           : lv.source === 'unsure'
             ? 'Too much piano to hear you'
             : lv.source === 'piano'
               ? 'Hearing only the piano'
               : lv.midi == null
-                ? 'Listening, not hearing you'
+                ? 'Not hearing you'
                 : 'Listening';
     } else {
       // between notes: say what is coming
@@ -689,7 +896,7 @@
         target = 'Next ' + SF.noteName(next.pitch, next.key ? next.key.flats : true);
         syl = next.key ? SF.solfege(next.pitch, next.key.doPc) : '';
       }
-      stateTxt = player.state === 'playing' ? (lv.listening ? 'Listening' : 'Chord: not listening') : 'Paused';
+      stateTxt = player.state === 'playing' ? (lv.listening ? 'Listening' : 'Chord, not judged') : 'Paused';
     }
     tuner.className = 'tuner ' + state;
     $('tTarget').textContent = target;
@@ -704,7 +911,7 @@
     const tl = $('tLast');
     if (last && listener.running && last.res.status !== 'none') {
       const r = last.res;
-      tl.textContent = 'Last note ' + (r.status === 'hit' ? '✓ ' + SF.fmtCents(r.cents) : r.status === 'silent' ? 'not heard' : SF.fmtCents(r.cents));
+      tl.textContent = 'Last ' + (r.status === 'hit' ? '✓ ' + SF.fmtCents(r.cents) : r.status === 'silent' ? 'not heard' : SF.fmtCents(r.cents));
       tl.style.color = 'var(--' + (r.status === 'none' ? 'silent' : r.status) + ')';
     } else tl.textContent = '';
   }
@@ -876,79 +1083,62 @@
   });
 
   // ---------------------------------------------------------------- results UI
+  let resTab = 'run';
   function renderResults() {
-    const now = $('resNow');
-    now.innerHTML = '';
-    const rows = [...scorer.byRound.values()].sort((a, b) => a.r - b.r);
-    if (!rows.length) {
-      now.innerHTML = '<p class="hint">Sing with the mic on and each key you finish shows up here.</p>';
-    } else {
-      const total = rows.reduce((s, r) => s + r.n, 0);
-      const pts = rows.reduce((s, r) => s + r.hit + 0.5 * r.close, 0);
-      const h = document.createElement('p');
-      h.innerHTML = '<b>' + Math.round((100 * pts) / total) + '%</b> of ' + total + ' notes over ' + rows.length + ' keys this time.';
-      now.append(h);
-      const list = document.createElement('div');
-      list.className = 'res-list';
-      for (const r of rows) {
-        const row = document.createElement('div');
-        row.className = 'res-row';
-        const bar = document.createElement('div');
-        bar.className = 'res-bar';
-        for (const [k, col] of [['hit', 'var(--hit)'], ['close', 'var(--close)'], ['off', 'var(--off)'], ['silent', 'var(--silent)']]) {
-          const i = document.createElement('i');
-          i.style.width = (100 * r[k]) / r.n + '%';
-          i.style.background = col;
-          bar.append(i);
-        }
-        const l = document.createElement('span');
-        l.textContent = r.label;
-        const c = document.createElement('span');
-        c.className = 'ct';
-        c.textContent = r.cents == null ? '' : SF.fmtCents(r.cents);
-        row.title = r.hit + ' in tune, ' + r.close + ' close, ' + r.off + ' off, ' + r.silent + ' not heard';
-        row.append(l, bar, c);
-        list.append(row);
-      }
-      now.append(list);
-    }
-    // history
     const hist = ex ? SF.History.forExercise(ex.id) : [];
-    const box = $('resHist');
-    box.innerHTML = '';
-    if (!hist.length) box.innerHTML = '<p class="hint">Nothing saved yet. A run is saved when it ends or you open another exercise.</p>';
-    for (const s of hist.slice(-15).reverse()) {
-      const row = document.createElement('div');
-      row.className = 'hist-row';
-      const d = new Date(s.t);
-      row.innerHTML =
-        '<span>' + esc(d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })) + '</span>' +
-        '<span>' + s.keys + ' keys, ' + s.bpm + ' bpm</span><span class="s">' + Math.round(s.score * 100) + '%</span>';
-      box.append(row);
-    }
-    drawSpark(hist);
+    for (const b of $('resTabs').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.tab === resTab));
+    $('resRun').hidden = resTab !== 'run';
+    $('resTime').hidden = resTab !== 'time';
+    const noteName = (m) => SF.noteName(m, true);
+    if (resTab === 'run') {
+      const ses = scorer.session;
+      const live = ses.rounds.length || ses.notes.length;
+      let run = live ? { notes: ses.notes, rounds: latestPerKey(ses.rounds), started: ses.started, bpm: Math.round(player.bpm), live: true } : lastRun && ex && lastRun.ex === ex.id ? lastRun : null;
+      // after opening the app again: the last run saved, from what was kept of it
+      const saved = hist[hist.length - 1];
+      if (!run && saved && saved.bd)
+        run = {
+          summary: SF.Report.fromCompact(saved.bd),
+          rounds: (saved.rounds || []).map((r) => ({ r: r.r, label: r.l, n: r.n, hit: r.h, close: r.c, off: r.o, silent: r.s, cents: r.ct, score: r.n ? (r.h + 0.5 * r.c) / r.n : 0 })),
+          started: saved.t,
+          bpm: saved.bpm,
+        };
+      SF.ResultsView.renderRun($('resRun'), run, hist, { noteName, onWeak: practiseWeak, onAll: allKeys });
+    } else SF.ResultsView.renderTime($('resTime'), hist, { noteName, onCsv: exportCsv, onClear: clearHistory });
   }
-  function drawSpark(hist) {
-    const cv = $('spark');
-    const r = cv.getBoundingClientRect();
-    const dpr = Math.min(2, root.devicePixelRatio || 1);
-    cv.width = r.width * dpr;
-    cv.height = r.height * dpr;
-    const g = cv.getContext('2d');
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, r.width, r.height);
-    const pts = hist.slice(-30);
-    if (pts.length < 2) return;
-    g.strokeStyle = SF.COLORS.target;
-    g.lineWidth = 2;
-    g.beginPath();
-    pts.forEach((s, i) => {
-      const x = 4 + (i / (pts.length - 1)) * (r.width - 8);
-      const y = r.height - 4 - s.score * (r.height - 8);
-      if (i) g.lineTo(x, y);
-      else g.moveTo(x, y);
-    });
-    g.stroke();
+  for (const b of $('resTabs').querySelectorAll('button')) {
+    b.onclick = () => {
+      resTab = b.dataset.tab;
+      renderResults();
+    };
+  }
+  function practiseWeak() {
+    const weak = [...scorer.byRound.values()].filter((r) => r.score < 0.7).map((r) => r.r);
+    if (!weak.length) return toast(scorer.byRound.size ? 'No weak keys: every key so far is at 70% or better.' : 'Sing some keys first.');
+    player.set({ subset: weak, loop: false });
+    S.loop = false;
+    updateLoopUI();
+    player.seekRound(weak[0], { preroll: S.preroll });
+    toast('Practising ' + weak.length + ' weak ' + (weak.length === 1 ? 'key' : 'keys') + '.');
+    closeDrawers();
+  }
+  function allKeys() {
+    player.set({ subset: null });
+    toast('All keys again.');
+  }
+  function exportCsv() {
+    const blob = new Blob([SF.History.csv()], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'scales-feedback-results.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  function clearHistory() {
+    if (!ex || !confirm('Clear the saved results of ' + ex.name + '?')) return;
+    SF.History.clear(ex.id);
+    if (lastRun && lastRun.ex === ex.id) lastRun = null;
+    renderResults();
   }
   function showSummary() {
     const rows = scorer.session.rounds.length ? scorer.session.rounds : [...scorer.byRound.values()];
@@ -996,14 +1186,17 @@
 
   // ---------------------------------------------------------------- calibration
   async function calibrate() {
-    if (!(listener.running && listener.refStream)) return toast('Turn on the mic and the piano filter first.');
+    if (calibrating) return;
+    if (!(listener.running && listener.hasRef)) return toast('Turn on the mic and Hear me over the piano first.');
     const out = currentOutput();
-    if (out.kind !== 'midi') toast('Calibrating with the in-app sound. For the piano filter, play on the piano.');
     player.pause();
     calibrating = true;
+    // (it learns from every frame of the calibration, in either mode)
+    listener.setFilterUse(true);
     listener.sendPlan();
     $('calib').hidden = false;
-    const tap = SF.tapOutput(out, (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now()));
+    $('calibWhat').textContent = out.kind === 'midi' ? 'The piano plays a run of notes so the app can learn how it sounds in your room.' : 'The app plays a run of notes so it can learn how its sound reaches your mic.';
+    const tap = tapOut;
     const lo = ex ? SF.clamp(ex.lo - 2, 28, 72) : 40;
     const hi = ex ? SF.clamp(ex.hi + 2, lo + 12, 96) : 76;
     const plan = SF.calibrationNotes(lo, hi, S.velAcc, S.velSing);
@@ -1023,13 +1216,16 @@
       tick();
     });
     calibrating = false;
+    listener.setFilterUse(filterWanted());
     listener.sendPlan();
     $('calib').hidden = true;
     const f = listener.filter;
-    if (f && f.ready) {
-      toast('<span class="big">Learned</span><br>The piano is about ' + Math.round(f.cancelDb) + ' dB quieter in what the app hears.');
+    const what = out.kind === 'midi' ? 'The piano is' : 'The app’s sound is';
+    if (f && f.noEcho) toast('The mic doesn’t hear ' + (out.kind === 'midi' ? 'the piano' : 'the app’s sound') + ' (headphones on?): there’s nothing to remove, so it listens to the mic as it is.', 6000);
+    else if (f && f.ready) {
+      toast('<span class="big">Learned</span><br>' + what + ' about ' + Math.round(f.cancelDb) + ' dB quieter in what the app hears.');
       listener.saveRoom(); // arrives as a 'room' event, which stores it
-    } else toast('Could not hear the piano through the mic. Turn the piano up a little, check the inputs, and calibrate again.');
+    } else toast('Could not hear ' + (out.kind === 'midi' ? 'the piano' : 'the app’s sound') + ' through the mic. Turn it up a little, check the inputs, and calibrate again.');
     updateRefUI();
   }
 
@@ -1066,8 +1262,13 @@
       player.set({ guide: S.guide });
       save();
       updateGuideUI();
+      // the filter as set for this mode (by default on in Play my notes, off in Chord only)
+      listener.setFilterUse(filterWanted());
+      updateRefUI();
     };
   }
+  $('filterBtn').onclick = toggleFilter;
+  $('metroBtn').onclick = () => setMetro(!S.metro);
   $('loopBtn').onclick = () => {
     S.loop = !player.cfg.loop;
     player.set({ loop: S.loop });
@@ -1173,15 +1374,79 @@
     updateKeyStrip();
   });
   bindCheck('shuffleOn', 'shuffle', (v) => player.set({ shuffle: v }));
-  bindCheck('histOn', 'hist', (v) => renderer.set({ history: v }));
-  bindCheck('fullKb', 'fullKb', (v) => {
-    renderer.set({ full: v });
-    renderer.fit(ex);
+  bindCheck('histOn', 'hist', (v) => {
+    renderer.set({ history: v });
+    placeBox(true);
   });
   bindCheck('pedalOn', 'pedal', () => {});
+  bindRange('metroVol', 'metroVol', (v) => v + '%', (v) => metronome.setVolume(v / 100));
+  bindCheck('filterGuide', 'filterGuide', () => {
+    listener.setFilterUse(filterWanted());
+    updateRefUI();
+  });
+  bindCheck('filterChord', 'filterChord', () => {
+    listener.setFilterUse(filterWanted());
+    updateRefUI();
+  });
+  // ---- the view
+  function setView(view, whites) {
+    S.kbView = view;
+    if (whites != null) S.kbWhites = SF.clamp(Math.round(whites), 8, 52);
+    save();
+    renderer.set({ view: S.kbView, whites: S.kbWhites });
+    updateViewUI();
+    placeBox(true);
+  }
+  function updateViewUI() {
+    $('kbView').value = S.kbView;
+    $('kbWhites').value = S.kbWhites;
+    $('kbWhitesV').textContent = S.kbWhites + ' white keys';
+    $('kbWhitesRow').hidden = S.kbView !== 'zoom';
+    $('feedback').value = S.feedback;
+    $('boxPlace').value = S.boxPlace;
+    $('boxPlaceRow').hidden = S.feedback !== 'all';
+  }
+  $('kbView').onchange = () => setView($('kbView').value, $('kbView').value === 'zoom' ? (renderer.zoomed ? S.kbWhites : renderer.whitesShown()) : null);
+  $('kbWhites').oninput = () => setView('zoom', +$('kbWhites').value);
+  $('kbWhites').onchange = () => $('kbWhites').blur();
+  /** Closer (dir -1: fewer keys across) or further (+1), from what shows now. */
+  function zoomBy(dir) {
+    const now = renderer.whitesShown();
+    const n = now + dir * Math.max(1, Math.round(now * 0.12));
+    if (dir > 0) {
+      // further out: the whole exercise, then all 88 keys
+      if (S.kbView === 'zoom') return n >= renderer.fitWhites() ? setView('fit') : setView('zoom', n);
+      if (S.kbView === 'fit') setView('all');
+      return;
+    }
+    if (n >= 8) setView('zoom', n);
+  }
+  $('kbReset').onclick = () => {
+    S.kbFrac = null;
+    S.histFrac = null;
+    save();
+    renderer.set({ kbFrac: null, histFrac: null });
+    placeBox(true);
+  };
+  function setFeedback(f) {
+    S.feedback = f;
+    save();
+    renderer.set({ feedback: f });
+    updateViewUI();
+    updateKeyStrip();
+    placeBox(true);
+  }
+  $('feedback').onchange = () => setFeedback($('feedback').value);
+  $('boxPlace').onchange = () => {
+    S.boxPlace = $('boxPlace').value;
+    save();
+    placeBox(true);
+  };
   $('refOn').checked = !!S.refOn;
   $('refOn').onchange = async () => {
     S.refOn = $('refOn').checked;
+    if (S.refOn) S.filterGuide = true; // (Chord only keeps its own setting)
+    listener.setFilterUse(filterWanted());
     save();
     if (S.refOn) {
       if (!listener.running) await micOn();
@@ -1200,6 +1465,8 @@
     if (!id) return;
     S.refId = id;
     S.refOn = true;
+    S.filterGuide = true;
+    listener.setFilterUse(filterWanted());
     save();
     updateRefUI();
     if (listener.running) await refOn();
@@ -1218,6 +1485,8 @@
   // when the browser hides the inputs: ask it for the piano's input (its box lets you choose)
   $('refAsk').onclick = async () => {
     S.refOn = true;
+    S.filterGuide = true;
+    listener.setFilterUse(filterWanted());
     save();
     askedPianoThisVisit = false;
     if (!listener.running) await micOn();
@@ -1235,7 +1504,7 @@
     } catch (e) {
       return toast('Turn on the mic (and the piano filter) and sing a little first.');
     }
-    d.meta.app = { exercise: ex ? ex.name : null, voice: player.cfg.voice, guide: player.cfg.guide, bpm: player.bpm, velAcc: S.velAcc, velSing: S.velSing, grace: S.grace, tol: S.tol, latency: S.latency, mic: listener.micLabel, piano: listener.refLabel, at: new Date().toISOString() };
+    d.meta.app = { exercise: ex ? ex.name : null, voice: player.cfg.voice, guide: player.cfg.guide, bpm: player.bpm, velAcc: S.velAcc, velSing: S.velSing, grace: S.grace, tol: S.tol, latency: S.latency, mic: listener.micLabel, piano: listener.refName, output: currentOutput().kind, metronome: !!S.metro, filterInUse: filterWanted(), at: new Date().toISOString() };
     const blob = SF.wavWithData(d.mic, d.ref, d.meta.sr, d.meta, d.side);
     const name = 'scales-feedback-take-' + new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-') + '.wav';
     try {
@@ -1259,7 +1528,12 @@
     toast('Saved ' + esc(name) + ' to your downloads.');
   };
   $('devReport').onclick = async () => {
-    const extra = ['app settings: mic ' + (S.micOn ? 'on' : 'off') + ', piano filter ' + (S.refOn ? 'on' : 'off') + ', output ' + S.output, 'mic line: ' + $('micStatus').textContent, 'piano line: ' + $('refStatus').textContent];
+    const extra = [
+      'app settings: mic ' + (S.micOn ? 'on' : 'off') + ', filter ' + (S.refOn ? 'on' : 'off') + ' (play my notes ' + (S.filterGuide ? 'on' : 'off') + ', chord only ' + (S.filterChord ? 'on' : 'off') + ', now ' + (filterWanted() ? 'in use' : 'not in use') + '), output ' + S.output + ', metronome ' + (S.metro ? 'on' : 'off'),
+      'mic line: ' + $('micStatus').textContent,
+      'filter line: ' + $('refStatus').textContent,
+      'piano input line: ' + $('refInStatus').textContent,
+    ];
     const text = await listener.report(extra);
     let copied = false;
     try {
@@ -1314,33 +1588,6 @@
     renderer.set({ labels: S.labels });
     save();
   };
-  $('weakBtn').onclick = () => {
-    const weak = [...scorer.byRound.values()].filter((r) => r.score < 0.7).map((r) => r.r);
-    if (!weak.length) return toast(scorer.byRound.size ? 'No weak keys: every key so far is at 70% or better.' : 'Sing some keys first.');
-    player.set({ subset: weak, loop: false });
-    S.loop = false;
-    updateLoopUI();
-    player.seekRound(weak[0], { preroll: S.preroll });
-    toast('Practising ' + weak.length + ' weak ' + (weak.length === 1 ? 'key' : 'keys') + '.');
-    closeDrawers();
-  };
-  $('allKeysBtn').onclick = () => {
-    player.set({ subset: null });
-    toast('All keys again.');
-  };
-  $('csvBtn').onclick = () => {
-    const blob = new Blob([SF.History.csv()], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'scales-feedback-results.csv';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  };
-  $('clearHist').onclick = () => {
-    if (!ex || !confirm('Clear the saved results of ' + ex.name + '?')) return;
-    SF.History.clear(ex.id);
-    renderResults();
-  };
   $('addFilesBtn').onclick = () => $('fileIn').click();
   $('emptyAdd').onclick = () => $('fileIn').click();
   $('emptyLink').onclick = async () => {
@@ -1373,6 +1620,128 @@
     openDrawer('lib');
   };
   $('libSearch').oninput = renderLibrary;
+
+  // ---------------------------------------------------------------- the picture, by hand
+  // Drag the keyboard's top or bottom edge to make it (or the strip under it) taller; click
+  // or drag along the keys to play them; drag the notes sideways (or wheel) to scroll when
+  // zoomed in; Ctrl + wheel (or pinch) zooms.
+  const cv = $('cv');
+  let grab = null;
+  const at = (e) => {
+    const r = cv.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  async function pressKey(p) {
+    SF.audio.resume();
+    held.add(p);
+    renderer.pressed.add(p);
+    const out = tapOut;
+    if (!out) return;
+    if (out.kind === 'samples' && bank) {
+      const sm = bank.pick(p, S.velSing);
+      if (sm && !bank.cache.has(sm.key)) await bank.prepare([p]);
+      if (!held.has(p)) return; // let go already
+    }
+    out.noteOn(p, S.velSing, SF.now());
+  }
+  function releaseKey(p) {
+    if (!held.has(p)) return;
+    held.delete(p);
+    lastKeyAt = SF.now();
+    renderer.pressed.delete(p);
+    if (tapOut) tapOut.noteOff(p, SF.now());
+  }
+  function releaseAll() {
+    for (const p of [...held]) releaseKey(p);
+  }
+  cv.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    const { x, y } = at(e);
+    const edge = renderer.edgeAt(y);
+    if (edge) grab = { kind: 'edge', edge };
+    else if (renderer.inScrollbar(y)) {
+      grab = { kind: 'bar' };
+      renderer.scrollbarTo(x);
+    } else {
+      const k = renderer.keyAt(x, y);
+      if (k != null) {
+        grab = { kind: 'key', key: k };
+        pressKey(k);
+      } else if (renderer.zoomed) grab = { kind: 'scroll', x0: x, sx0: renderer.sx };
+    }
+    if (grab) {
+      cv.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const { x, y } = at(e);
+    if (!grab) {
+      // say what a press would do
+      const edge = renderer.edgeAt(y);
+      cv.style.cursor = edge ? 'ns-resize' : renderer.keyAt(x, y) != null ? 'pointer' : renderer.zoomed && y < renderer.yNow ? 'grab' : renderer.inScrollbar(y) ? 'pointer' : '';
+      return;
+    }
+    if (grab.kind === 'edge') {
+      const fr = renderer.dragEdge(grab.edge, y);
+      if (fr) {
+        S.kbFrac = fr.kbFrac;
+        S.histFrac = fr.histFrac;
+      }
+    } else if (grab.kind === 'key') {
+      // a glissando: along the keys, whatever the height
+      const k = renderer.keyAt(x, SF.clamp(y, renderer.yNow + 1, renderer.yNow + renderer.kbH * 0.95));
+      if (k != null && k !== grab.key) {
+        releaseKey(grab.key);
+        grab.key = k;
+        pressKey(k);
+      }
+    } else if (grab.kind === 'scroll') {
+      cv.style.cursor = 'grabbing';
+      renderer.scrollTo(grab.sx0 - (x - grab.x0));
+    } else if (grab.kind === 'bar') renderer.scrollbarTo(x);
+  });
+  const letGo = () => {
+    if (!grab) return;
+    if (grab.kind === 'key') releaseKey(grab.key);
+    if (grab.kind === 'edge') {
+      save();
+      placeBox(true);
+    }
+    grab = null;
+    cv.style.cursor = '';
+  };
+  cv.addEventListener('pointerup', letGo);
+  cv.addEventListener('pointercancel', letGo);
+  cv.addEventListener('lostpointercapture', letGo);
+  cv.addEventListener('dblclick', (e) => {
+    // double-click an edge: back to the automatic size
+    if (!renderer.edgeAt(at(e).y)) return;
+    $('kbReset').click();
+  });
+  cv.addEventListener(
+    'wheel',
+    (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        // zoom (a touchpad's pinch arrives as this too)
+        e.preventDefault();
+        wheelZoom += e.deltaY;
+        if (Math.abs(wheelZoom) >= 40) {
+          zoomBy(wheelZoom > 0 ? 1 : -1);
+          wheelZoom = 0;
+        }
+      } else if (renderer.zoomed) {
+        e.preventDefault();
+        const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        renderer.scrollBy(d * (e.deltaMode === 1 ? 20 : 1));
+      }
+    },
+    { passive: false }
+  );
+  let wheelZoom = 0;
+  cv.addEventListener('contextmenu', (e) => {
+    if (grab) e.preventDefault();
+  });
 
   // drag and drop anywhere
   let dragDepth = 0;
@@ -1416,6 +1785,16 @@
     else if (k === 'g' || k === 'G') $('guideSeg').querySelector('[data-guide="' + (player.cfg.guide ? 'off' : 'on') + '"]').click();
     else if (k === 'l' || k === 'L') $('loopBtn').click();
     else if (k === 'm' || k === 'M') $('micBtn').click();
+    else if (k === 'f' || k === 'F') toggleFilter();
+    else if (k === 'k' || k === 'K') setMetro(!S.metro);
+    else if (k === 'h' || k === 'H') {
+      const order = ['all', 'where', 'none'];
+      const f = order[(order.indexOf(S.feedback) + 1) % 3];
+      setFeedback(f);
+      toast(f === 'all' ? 'Showing how you’re doing as you sing.' : f === 'where' ? 'Showing only where you sing, not whether you hit the notes.' : 'Showing nothing while you sing: the results wait for the end.');
+    } else if (k === '+' || k === '=') zoomBy(-1);
+    else if (k === '-' || k === '_') zoomBy(1);
+    else if (k === '0') setView('fit');
     else if (k === 'v' || k === 'V') {
       if (ex && ex.voices > 1) {
         const order = ex.voiceLabels.map((_, i) => i).concat(['any']);
@@ -1460,8 +1839,14 @@
   root.addEventListener('focus', () => {
     if (library.folder && library.folder.state === 'granted') library.refresh();
   });
-  root.addEventListener('resize', () => renderer.resize());
-  if (root.ResizeObserver) new ResizeObserver(() => renderer.resize()).observe($('stage'));
+  const resized = () => {
+    renderer.resize();
+    placeBox(true);
+  };
+  root.addEventListener('resize', resized);
+  if (root.ResizeObserver) new ResizeObserver(resized).observe($('stage'));
+  // a key held on the screen when the window loses the pointer
+  root.addEventListener('blur', () => releaseAll());
 
   // ---------------------------------------------------------------- loop
   function frame() {
@@ -1480,6 +1865,9 @@
     updateGuideUI();
     updateLoopUI();
     updateMicUI();
+    updateMetroUI();
+    updateViewUI();
+    placeBox(true);
     applyOutput();
     try {
       bank = await SF.SampleBank.load();
@@ -1521,6 +1909,6 @@
   }
   document.addEventListener('pointerdown', firstGesture, true);
   document.addEventListener('keydown', firstGesture, true);
-  root.SFApp = { player, scorer, renderer, listener, library, midi, get ex() { return ex; }, S, openExercise, calibrate, toast };
+  root.SFApp = { player, scorer, renderer, listener, library, midi, synth, metronome, get ex() { return ex; }, get out() { return tapOut; }, S, openExercise, calibrate, toast };
   start();
 })(window);

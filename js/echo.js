@@ -558,12 +558,41 @@
         for (let i = 0; i < len; i++) e += ref[i] * ref[i];
         e /= len;
       }
+      if (ref) {
+        let em = 0;
+        for (let i = 0; i < len; i++) em += mic[i] * mic[i];
+        this.noteEcho(em / len, e, quiet);
+      }
       for (let s = Math.floor(this.n / this.B); s <= Math.floor((this.n + len - 1) / this.B); s++) {
         this.quietR[s & q] = quiet === 2 ? 2 : quiet ? 1 : 0;
         this.refE[s & q] = e;
       }
       this.n += len;
       this.step();
+    }
+    /**
+     * Does the mic hear the piano at all? With headphones on (or the piano turned right down)
+     * it doesn't: the filter could never learn the room, and would leave the notes unjudged.
+     * The mic's level while the piano plays (and nobody sings) against the room's own floor
+     * tells: then the frames are simply judged as they are (this.noEcho).
+     */
+    noteEcho(em, er, quiet) {
+      // the room's floor: the quietest the mic gets, let up very slowly (a dB in 13 s)
+      this.micFloor = this.micFloor == null ? em : Math.min(em, this.micFloor * 1.0002);
+      if (this.delay != null) {
+        this.noEcho = false;
+        return;
+      }
+      if (!quiet || !(er > 3e-6)) return;
+      this.echoOn = (this.echoOn || 0) + em;
+      this.echoOnN = (this.echoOnN || 0) + 1;
+      if (this.echoOnN >= (4 * this.sr) / this.B) {
+        const rise = 10 * Math.log10(this.echoOn / this.echoOnN / Math.max(this.micFloor, 1e-14));
+        this.noEcho = rise < 2.5;
+        this.echoRise = rise;
+        this.echoOn /= 2;
+        this.echoOnN /= 2;
+      }
     }
     keyEvents(events) {
       for (const ev of events) {
@@ -1164,6 +1193,9 @@
       this.spec = null;
       this.restored = false;
       this.statsRestored = false;
+      this.noEcho = false;
+      this.echoOn = 0;
+      this.echoOnN = 0;
       this.alignPos = this.n;
       this.done = this.n;
     }
@@ -1468,12 +1500,15 @@
     const W = tracker.size;
     if (!analyzeFrame.buf || analyzeFrame.buf.length !== W) analyzeFrame.buf = new Float32Array(W);
     const buf = analyzeFrame.buf;
+    // the filter turned off (opts.bypass): the mic as it is, nothing taken away
+    const raw = !!opts.bypass;
+    const src = raw ? pf.micR : pf.resR;
     let em = 0;
     let ee = 0;
     let er = 0;
     for (let i = 0; i < W; i++) {
       const k = (end - W + i) & pf.mask;
-      const r = pf.resR[k];
+      const r = src[k];
       buf[i] = r;
       er += r * r;
       em += pf.micR[k] * pf.micR[k];
@@ -1491,8 +1526,10 @@
       spec.frame(pf, end);
       if (pf.postR) spec.clean(end, pf.postR, pf.mask);
     }
-    if (!pf.hasRef) {
-      noteVoice(pf, fr, er, W, end);
+    if (!pf.hasRef || raw || pf.noEcho) {
+      // no filter (none connected, turned off, or the mic doesn't hear the piano at all);
+      // (turned off, the mic's level includes the piano: it says nothing of the voice's)
+      if (!raw) noteVoice(pf, fr, er, W, end);
       return fr;
     }
     // how the piano is tuned, from its own audio (now and then: it doesn't change)

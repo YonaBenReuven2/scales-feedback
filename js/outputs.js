@@ -8,6 +8,7 @@
 
   // ---------- the one AudioContext ----------
   let ctx = null;
+  let bus = null;
   SF.audio = {
     get ctx() {
       if (!ctx) {
@@ -15,6 +16,16 @@
         ctx = new AC({ latencyHint: 'interactive' });
       }
       return ctx;
+    },
+    /** Everything the app itself plays (the synth, the samples, the metronome, keys clicked)
+     *  goes through here to the speakers: the piano filter can take it as what to remove. */
+    get bus() {
+      if (!bus) {
+        const c = SF.audio.ctx;
+        bus = c.createGain();
+        bus.connect(c.destination);
+      }
+      return bus;
     },
     get exists() {
       return !!ctx;
@@ -29,6 +40,17 @@
         }
       }
       return c;
+    },
+    /** Seconds between the audio being worked out and being heard at the speakers. */
+    outputLag() {
+      const c = SF.audio.ctx;
+      let lag = null;
+      if (c.getOutputTimestamp) {
+        const ts = c.getOutputTimestamp();
+        if (ts && ts.contextTime != null && isFinite(ts.contextTime) && ts.contextTime > 0) lag = c.currentTime - ts.contextTime;
+      }
+      if (lag == null || !isFinite(lag)) lag = (c.outputLatency || 0) + (c.baseLatency || 0);
+      return SF.clamp(lag, 0, 0.5);
     },
     /** Context time at which a sound should start to be heard at performance time ms. */
     timeAt(ms) {
@@ -183,7 +205,7 @@
       comp.threshold.value = -12;
       comp.ratio.value = 4;
       this.out.connect(comp);
-      comp.connect(c.destination);
+      comp.connect(SF.audio.bus);
       // a soft, piano-ish tone: falling harmonics
       const n = 12;
       const re = new Float32Array(n);
@@ -256,7 +278,7 @@
       const c = SF.audio.ctx;
       this.out = c.createGain();
       this.out.gain.value = this.volume;
-      this.out.connect(c.destination);
+      this.out.connect(SF.audio.bus);
     }
     noteOn(p, v, at) {
       const s = this.bank && this.bank.pick(p, v);
@@ -316,6 +338,84 @@
     }
   }
 
+  // ---------- the metronome ----------
+  /**
+   * A click on every beat. It is a few milliseconds of noise, so it has no pitch the mic could
+   * take for a sung note, with or without the piano filter. The scorer asks clickedNear() and
+   * doesn't count a frame the click drowned out.
+   */
+  class Metronome {
+    constructor() {
+      this.volume = 0.7;
+      this.live = new Set();
+      this.times = []; // page times of the clicks scheduled lately
+    }
+    setup() {
+      if (this.out) return;
+      const c = SF.audio.ctx;
+      this.out = c.createGain();
+      this.out.gain.value = this.volume;
+      this.out.connect(SF.audio.bus);
+      const n = Math.round(c.sampleRate * 0.012);
+      this.noise = c.createBuffer(1, n, c.sampleRate);
+      const d = this.noise.getChannelData(0);
+      let seed = 12345;
+      for (let i = 0; i < n; i++) {
+        seed = (seed * 16807) % 2147483647;
+        d[i] = ((seed / 2147483647) * 2 - 1) * Math.exp(-i / (c.sampleRate * 0.0022));
+      }
+    }
+    setVolume(v) {
+      this.volume = v;
+      if (this.out) this.out.gain.value = v;
+    }
+    /** A click at page time at (ms); accent: the first beat of a bar. */
+    click(at, accent) {
+      this.setup();
+      const c = SF.audio.ctx;
+      const t = SF.audio.timeAt(at);
+      const src = c.createBufferSource();
+      src.buffer = this.noise;
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = accent ? 3400 : 2300;
+      bp.Q.value = 0.8;
+      const g = c.createGain();
+      g.gain.value = accent ? 1.4 : 0.8;
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(this.out);
+      src.start(t);
+      this.live.add(src);
+      src.onended = () => this.live.delete(src);
+      this.times.push(at);
+      if (this.times.length > 64) this.times.splice(0, this.times.length - 64);
+    }
+    /** Stop the clicks already scheduled (on pause or a jump). */
+    cancel() {
+      const now = SF.now();
+      for (const s of this.live) {
+        try {
+          s.stop();
+        } catch (e) {
+          /* already played */
+        }
+      }
+      this.live.clear();
+      this.times = this.times.filter((t) => t <= now);
+    }
+    /** Was there a click within ms of page time t (the mic hears it a little after)? */
+    clickedNear(t, ms) {
+      const w = ms == null ? 45 : ms;
+      for (let i = this.times.length - 1; i >= 0; i--) {
+        const d = t - this.times[i];
+        if (d >= -w && d <= w + 25) return true;
+        if (d > w + 25) break;
+      }
+      return false;
+    }
+  }
+
   /** A pass-through that also reports each key pressed and released (the piano filter
    *  wants to know): onNote(at, pitch, on). */
   function tap(out, onNote, onAll) {
@@ -345,6 +445,7 @@
   SF.Midi = Midi;
   SF.Synth = Synth;
   SF.SamplePlayer = SamplePlayer;
+  SF.Metronome = Metronome;
   SF.tapOutput = tap;
   SF.PIANO_RE = PIANO_RE;
 })(typeof window !== 'undefined' ? window : globalThis);

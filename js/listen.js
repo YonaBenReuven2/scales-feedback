@@ -123,6 +123,7 @@ registerProcessor('sf-capture', SFCapture);`;
       this.running = false;
       this.micStream = null;
       this.refStream = null;
+      this.refApp = false; // the reference is the app's own sound (synth, samples), not the piano's audio
       this.micId = null;
       this.refId = null;
       // Set by the app: when singing is expected, so the piano is only learned from while
@@ -205,8 +206,35 @@ registerProcessor('sf-capture', SFCapture);`;
     get pf() {
       return this.ears ? this.ears.pf : null;
     }
+    /** Is there something to cancel from the mic: the piano's USB audio, or the app's own sound? */
+    get hasRef() {
+      return !!this.refStream || this.refApp;
+    }
+    /** What to call the reference in messages and in the saved rooms. */
+    get refName() {
+      return this.refApp ? 'The app’s sound' : this.refLabel || '';
+    }
+    /**
+     * Take the app's own sound (everything it plays: the synth, the samples, the metronome) as
+     * what to remove from the mic, instead of the piano's USB audio. Nothing to open: the
+     * app knows exactly what it sends to the speakers.
+     */
+    async setAppReference(on) {
+      on = !!on;
+      if (on === this.refApp && (!on || !this.refStream)) return;
+      if (on) this.dropReference();
+      this.refApp = on;
+      if (on) this.note('reference: the app’s own sound');
+      await this.rebuilt();
+    }
+    /** Use the filter, or just listen (the reference stays connected and keeps being learned
+     *  from, so turning it back on is instant). */
+    setFilterUse(on) {
+      this.filterUse = on !== false;
+      if (this.engine) this.send({ type: 'use', on: this.filterUse });
+    }
     startEngine() {
-      this.lastStart = { type: 'start', sr: this.sr, hasRef: !!this.refStream, gateDb: this.gateDb, minClarity: this.minClarity, saved: this.savedRoom || null, recordSec: this.recordSec || 40 };
+      this.lastStart = { type: 'start', sr: this.sr, hasRef: this.hasRef, refKind: this.refApp ? 'app' : 'piano', use: this.filterUse !== false, gateDb: this.gateDb, minClarity: this.minClarity, saved: this.savedRoom || null, recordSec: this.recordSec || 40 };
       this.status = null;
       this.send(this.lastStart);
       this.sendPlan();
@@ -389,9 +417,10 @@ registerProcessor('sf-capture', SFCapture);`;
       this.startEngine();
       this.emit('state');
     }
-    /** Use the piano's USB audio to cancel the piano (null to stop). */
+    /** Use the piano's USB audio to cancel the piano (null: nothing to cancel). */
     async setReference(refId) {
       this.dropReference();
+      this.refApp = false;
       let err = null;
       if (refId) {
         const log = (m) => this.note(m);
@@ -432,6 +461,7 @@ registerProcessor('sf-capture', SFCapture);`;
      */
     async askReference(lastId) {
       this.dropReference();
+      this.refApp = false;
       const log = (m) => this.note(m);
       let err = null;
       try {
@@ -529,7 +559,8 @@ registerProcessor('sf-capture', SFCapture);`;
         L.push(what + ': ' + t.label + ' | ' + t.readyState + (t.muted ? ', muted' : '') + ' | id ' + short(st.deviceId) + ' | ' + (st.sampleRate || '?') + ' Hz, ' + (st.channelCount || '?') + ' ch, echo cancellation ' + st.echoCancellation + ', noise suppression ' + st.noiseSuppression + ', auto gain ' + st.autoGainControl);
       };
       tr(this.micStream, 'mic');
-      tr(this.refStream, 'piano input');
+      if (this.refApp) L.push('reference: the app’s own sound (output latency ' + Math.round(SF.audio.outputLag() * 1000) + ' ms)');
+      else tr(this.refStream, 'piano input');
       L.push('ids in use: mic ' + short(this.micId) + ', piano ' + short(this.refId));
       const ctx = SF.audio.exists ? SF.audio.ctx : null;
       L.push('audio: ' + (ctx ? ctx.state + ', ' + ctx.sampleRate + ' Hz' : 'not started') + ', capture ' + (this.mode || '-') + ', engine ' + (this.engine ? this.engine.kind : '-') + ', listening ' + this.running);
@@ -544,6 +575,14 @@ registerProcessor('sf-capture', SFCapture);`;
      * keeps running and would interleave blocks of silence with the new one's. */
     teardown() {
       this.gen = (this.gen || 0) + 1;
+      if (this.busTap) {
+        try {
+          SF.audio.bus.disconnect(this.busTap);
+        } catch (e) {
+          /* already apart */
+        }
+        this.busTap = null;
+      }
       if (this.nodes) this.nodes.forEach((n) => n.disconnect());
       this.nodes = null;
       const cap = this.capture;
@@ -571,7 +610,14 @@ registerProcessor('sf-capture', SFCapture);`;
       const mic = ctx.createMediaStreamSource(this.micStream);
       mic.connect(merger, 0, 0);
       const nodes = [merger, mic];
-      if (this.refStream) {
+      if (this.refApp) {
+        // the app's own sound, as it goes to the speakers, sample for sample with the mic
+        const tap = ctx.createGain();
+        SF.audio.bus.connect(tap);
+        tap.connect(merger, 0, 1);
+        nodes.push(tap);
+        this.busTap = tap;
+      } else if (this.refStream) {
         const ref = ctx.createMediaStreamSource(this.refStream);
         if (stereo) {
           const sp = ctx.createChannelSplitter(2);
@@ -633,15 +679,17 @@ registerProcessor('sf-capture', SFCapture);`;
     }
     /** The app tells us when it pressed (on) or released a key, in performance ms. */
     markKey(at, pitch, on) {
-      if (!this.running || !this.refStream) return;
-      // the piano's USB audio is a few ms behind the MIDI
-      this.send({ type: 'keys', events: [{ t: at + 8, p: pitch == null ? -1 : pitch, on: on !== false }] });
+      if (!this.running || !this.hasRef) return;
+      // the piano's USB audio is a few ms behind the MIDI; the app's own sound passes the
+      // capture before it reaches the speakers (at is when it is heard)
+      const t = this.refApp ? at - SF.audio.outputLag() * 1000 : at + 8;
+      this.send({ type: 'keys', events: [{ t, p: pitch == null ? -1 : pitch, on: on !== false }] });
     }
     markOnset(at, pitch) {
       this.markKey(at, pitch, true);
     }
     markAllOff(at) {
-      if (!this.running || !this.refStream) return;
+      if (!this.running || !this.hasRef) return;
       this.send({ type: 'keys', events: [{ t: at + 8, p: 'all', on: false }] });
     }
     /** A captured block: on to the engine, stamped with the page clock. s: the piano's side
@@ -660,7 +708,7 @@ registerProcessor('sf-capture', SFCapture);`;
     }
     /** Status of the piano filter, for the UI (a quarter of a second old at most). */
     get filter() {
-      if (!this.refStream || !this.running) return null;
+      if (!this.hasRef || !this.running) return null;
       return this.status || { delayMs: null, ready: false, solved: false, cancelDb: 0, learned: 0, keys: 0, restored: false, realigns: 0 };
     }
     stopStreams(keepRef) {

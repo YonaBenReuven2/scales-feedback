@@ -184,3 +184,32 @@ test('opened from the disk: the mic handed back again is refused; the piano from
   assert.strictEqual(L.refLabel, PIANO.label);
   assert.deepStrictEqual(st.calls, ['any@prompt', 'h-piano!@prompt']);
 });
+
+test('the app’s own sound as what to remove: nothing to open, its keys marked as they leave for the speakers', async () => {
+  browser({ perm: 'granted' });
+  const L = listener();
+  SF.audio.outputLag = () => 0.05;
+  await L.start(null);
+  const sent = [];
+  L.engine = {};
+  L.send = (m) => sent.push(m);
+  await L.setAppReference(true);
+  assert.ok(L.refApp && L.hasRef && !L.refStream);
+  assert.strictEqual(L.refName, 'The app’s sound');
+  // heard at 1000 ms; it left the app 50 ms earlier, which is when it passes the capture
+  L.markKey(1000, 60, true);
+  assert.deepStrictEqual(sent.pop(), { type: 'keys', events: [{ t: 950, p: 60, on: true }] });
+  // the piano's USB audio takes its place, and stopping it leaves nothing to remove
+  await L.setReference(PIANO.id);
+  assert.ok(!L.refApp && L.refStream && L.hasRef);
+  L.markKey(1000, 60, true);
+  assert.strictEqual(sent.pop().events[0].t, 1008, 'the piano’s audio is a few ms behind its MIDI');
+  await L.setAppReference(true);
+  assert.ok(L.refApp && !L.refStream, 'the piano’s input is closed again');
+  await L.setReference(null);
+  assert.ok(!L.hasRef);
+  // the filter can step aside without closing anything
+  L.setFilterUse(false);
+  assert.deepStrictEqual(sent.pop(), { type: 'use', on: false });
+  assert.strictEqual(L.filterUse, false);
+});

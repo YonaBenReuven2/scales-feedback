@@ -1,6 +1,6 @@
 // Writes small Standard MIDI Files for tests: new exercises made up on the spot.
 //   smf({ ppq, bpm, tracks: [{ name, ch, notes: [{ p, t, d, v }] }] })   t and d in beats
-//   tempo changes: tempos: [{ t, bpm }] (beats)
+//   tempo changes: tempos: [{ t, bpm }] (beats); a time signature: timeSig: { num, den }
 function vlq(n) {
   const out = [n & 0x7f];
   while ((n >>= 7)) out.unshift((n & 0x7f) | 0x80);
@@ -22,6 +22,7 @@ function smf(spec) {
   const ppq = spec.ppq || 480;
   const tracks = [];
   const tempo = [{ tick: 0, order: 0, data: tempoEv(spec.bpm || 100) }];
+  if (spec.timeSig) tempo.push({ tick: 0, order: 0, data: [0xff, 0x58, 4, spec.timeSig.num, Math.log2(spec.timeSig.den), 24, 8] });
   for (const tc of spec.tempos || []) tempo.push({ tick: tc.t * ppq, order: 0, data: tempoEv(tc.bpm) });
   tracks.push(track(tempo));
   for (const tr of spec.tracks) {

@@ -67,7 +67,8 @@ function scene(o) {
   const ref = R.piano(ev, sr, dur);
   let room;
   if (o.roomSeed) R.reseed(o.roomSeed); // the same room in two sessions
-  if (!o.harsh) room = R.shift(R.convolve(ref, R.roomIR(sr, { rt60: 0.35 })), 0.0283 * sr, o.drift || 0);
+  if (o.noRoom) room = new Float32Array(ref.length); // headphones: the mic hears none of it
+  else if (!o.harsh) room = R.shift(R.convolve(ref, R.roomIR(sr, { rt60: 0.35 })), (o.delay || 0.0283) * sr, o.drift || 0);
   else {
     // a harder room: speakers that distort a little, an echo longer than the filter models,
     // and a room that shifts as you move. About 15 dB of the piano can be removed.
@@ -106,7 +107,7 @@ function scene(o) {
       ve += v[i] * v[i];
     }
   }
-  const g = o.voiceDb == null ? 0 : Math.sqrt(pe / Math.max(ve, 1e-12)) * Math.pow(10, o.voiceDb / 20);
+  const g = o.voiceDb == null ? 0 : o.noRoom ? 0.05 : Math.sqrt(pe / Math.max(ve, 1e-12)) * Math.pow(10, o.voiceDb / 20);
   const mic = new Float32Array(ref.length);
   for (let i = 0; i < mic.length; i++) mic[i] = room[i] + g * v[i] + 2e-4 * R.gauss();
   if (o.agc) {
@@ -118,7 +119,7 @@ function scene(o) {
 }
 
 /** Streams the scene through the filter as the app does; returns what each sung frame said. */
-function run(sc, pf0) {
+function run(sc, pf0, opts) {
   const pf = pf0 || new SF.PianoFilter(sr, {});
   const tr = new SF.PitchTracker(sr, { size: 2048 });
   const W = 2048;
@@ -142,7 +143,7 @@ function run(sc, pf0) {
     while (analyzed + 512 <= pf.done) {
       analyzed += 512;
       const tc = (analyzed - W / 2) / sr;
-      const fr = SF.analyzeFrame(pf, tr, analyzed, tc * 1000);
+      const fr = SF.analyzeFrame(pf, tr, analyzed, tc * 1000, opts);
       const s = sc.sung.find((x) => tc >= x.t + 0.1 && tc < x.t + x.d - 0.03);
       if (!s) continue;
       out.frames++;
@@ -300,4 +301,33 @@ test('a saved room is not spoiled by the first chord it hears again', () => {
   const r = run(scene({ seed: 5, roomSeed: 77 }), pf);
   assert.strictEqual(r.voiced, 0, 'nothing heard from the piano alone: ' + JSON.stringify(r.src) + ' ' + JSON.stringify(r.why));
   assert.ok(pf.cancelDb > 15, 'still cancels ' + pf.cancelDb);
+});
+
+test('turned off, the mic is judged as it is: the piano heard is the piano', () => {
+  // (nobody sings: with the filter the piano never passes for a voice; without it, it does)
+  const sc = scene({ seed: 41, calib: true });
+  const on = run(sc);
+  const off = run(sc, null, { bypass: true });
+  assert.strictEqual(on.voiced, 0);
+  assert.ok(off.voiced > 0.8 * off.frames, 'the mic as it is: ' + off.voiced + ' of ' + off.frames);
+  assert.ok(off.hit > 0.8 * off.voiced, 'reading the piano’s own notes');
+  // and the filter still learns the room meanwhile
+  assert.ok(off.pf.solved && off.pf.delay != null);
+});
+
+test('with headphones (the mic doesn’t hear the piano) it listens to the mic as it is', () => {
+  const sc = scene({ seed: 42, calib: true, noRoom: true, voiceDb: 0 });
+  const out = run(sc);
+  assert.ok(out.pf.noEcho, 'notices the mic hears none of it');
+  assert.strictEqual(out.pf.delay, null);
+  assert.ok(!out.src.learning, 'never waits to learn keys: ' + JSON.stringify(out.src));
+  assert.ok(out.hit >= 0.9 * out.frames, out.hit + ' of ' + out.frames);
+});
+
+test('the app’s own sound, a long way behind at the mic (the speakers’ delay), is found and removed', () => {
+  const sc = scene({ seed: 43, calib: true, voiceDb: -6, delay: 0.21 });
+  const out = run(sc, new SF.PianoFilter(sr, { maxLag: 0.45 }));
+  assert.ok(Math.abs(out.pf.delay / sr - 0.21) < 0.002, 'delay ' + (out.pf.delay / sr).toFixed(4));
+  assert.ok(out.pf.ready && out.pf.cancelDb > 12, 'removes ' + out.pf.cancelDb);
+  assert.ok(out.hit >= 0.8 * out.frames, out.hit + ' of ' + out.frames);
 });

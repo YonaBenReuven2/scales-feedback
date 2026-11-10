@@ -57,6 +57,8 @@
       this.schedP = 0;
       this.endP = Infinity;
       this.output = null;
+      this.metronome = null; // {click(atMs, accent), cancel()} when the metronome is on
+      this.clickP = 0; // clicks are scheduled up to here
       this.curSeg = null;
       this.shuffled = [];
       this.cfg = Object.assign(
@@ -93,6 +95,7 @@
       this.curSeg = null;
       this.seekRound(this.firstRound(), { preroll: this.cfg.preroll });
       this.emit('load', ex);
+      this.emit('state', this.state); // a new exercise starts paused
     }
     reshuffle() {
       const n = this.ex ? this.ex.rounds.length : 0;
@@ -169,6 +172,7 @@
       this.anchor(this.P, now);
       this.state = 'playing';
       this.schedP = this.P;
+      this.clickP = this.P;
       this.pending = [];
       this.restrike(this.P);
       this.tick();
@@ -188,6 +192,13 @@
     stopSound() {
       this.pending = [];
       if (this.output) this.output.allOff();
+      if (this.metronome) this.metronome.cancel();
+    }
+    /** Turn the metronome on (an object with click(atMs, accent) and cancel()) or off (null). */
+    setMetronome(m) {
+      if (this.metronome && this.metronome !== m) this.metronome.cancel();
+      this.metronome = m;
+      if (this.state === 'playing') this.clickP = this.position();
     }
     /** Jump to the start of round r. */
     seekRound(r, opts) {
@@ -210,6 +221,7 @@
       if (playing) {
         this.anchor(P, now);
         this.schedP = P;
+        this.clickP = P;
       } else {
         this.P = P;
         if (this.state === 'ended') this.state = 'paused';
@@ -375,6 +387,58 @@
       }
     }
 
+    // ---------- beats ----------
+    /** The beat, in ticks (a dotted quarter in 6/8, 9/8, 12/8), and the bar. */
+    beatTicks() {
+      const ex = this.ex;
+      const ts = ex.timeSig || { num: 4, den: 4 };
+      let beat = (ex.ppq * 4) / ts.den;
+      if (ts.den === 8 && ts.num % 3 === 0 && ts.num > 3) beat *= 3;
+      return { beat, bar: (ex.ppq * 4 * ts.num) / ts.den };
+    }
+    /**
+     * Calls fn(P, downbeat) for every beat in [Pa, Pb): on the file's own beat grid inside a
+     * key, and counting in during the gap before one.
+     */
+    beatsIn(Pa, Pb, fn) {
+      const ex = this.ex;
+      if (!ex || !ex.tempo || !(Pb > Pa)) return;
+      const { beat, bar } = this.beatTicks();
+      const tm = ex.tempo;
+      const isBar = (tick) => Math.abs(tick / bar - Math.round(tick / bar)) < 0.01;
+      const segs = this.past.concat(this.queue);
+      for (let i = 0; i < segs.length; i++) {
+        const seg = segs[i];
+        const end = seg.cutAt != null ? Math.min(seg.cutAt, seg.P1) : seg.P1;
+        if (end <= Pa || seg.P0 >= Pb) continue;
+        if (seg.kind === 'round') {
+          const from = Math.max(Pa, seg.P0);
+          let tick = Math.ceil((tm.tick(seg.s0 + (from - seg.P0)) - 1e-6) / beat) * beat;
+          for (let k = 0; k < 4096; k++, tick += beat) {
+            const P = seg.P0 + (tm.sec(tick) - seg.s0);
+            if (P >= Math.min(Pb, end)) break;
+            if (P >= Pa) fn(P, isBar(tick));
+          }
+        } else {
+          // a gap: count in to the key after it, on that key's grid
+          const nxt = segs[i + 1];
+          if (!nxt || nxt.kind !== 'round') continue;
+          const first = Math.ceil((tm.tick(nxt.s0) - 1e-6) / beat) * beat;
+          const beats = [];
+          for (let k = 1; k < 64; k++) {
+            const tick = first - k * beat;
+            const P = nxt.P0 + (tm.sec(tick) - nxt.s0);
+            if (P < seg.P0 - 1e-9) break;
+            beats.push([P, isBar(tick)]);
+          }
+          for (let k = beats.length - 1; k >= 0; k--) {
+            const [P, b] = beats[k];
+            if (P >= Pa && P < Pb && P < end) fn(P, b);
+          }
+        }
+      }
+    }
+
     // ---------- what sounds ----------
     isTarget(n) {
       if (n.role !== 'sing') return false;
@@ -445,6 +509,12 @@
           else this.output.noteOff(e.pitch, at);
         }
         if (i) this.pending.splice(0, i);
+      }
+      // the metronome, a beat at a time, as far ahead as the notes
+      if (this.metronome && horizon > this.clickP) {
+        const from = this.clickP;
+        this.clickP = horizon;
+        this.beatsIn(from, horizon, (Pb, bar) => this.metronome.click(this.perfAt(Pb), bar));
       }
 
       const seg = this.segmentAt(P);

@@ -1,12 +1,14 @@
-/* Filter lab: tests the piano filter on the real piano, mic and room.
+/* Filter lab: tests the filter on the real mic and room, with the piano (its USB audio is
+ * what to remove) or the app's own sound (the samples or the built-in synth, through the
+ * speakers: what the app sends them is what to remove).
  *
- * The piano plays the app's calibration while you stay quiet, then a short exercise (three
- * keys of "chord, five notes, chord") to sing along to. Both inputs are recorded the whole
- * time; afterwards the same filter code the app uses runs over the recording here, from
- * nothing learned, and gives back the pitch it heard against the notes to sing, and things to
- * listen to: the mic, the piano's own audio, the piano as the filter predicts the mic hears it,
- * the mic with that removed, and that cleaned up further with what the filter learned of the
- * piano's leftover frequency by frequency.
+ * It plays the app's calibration while you stay quiet, then an exercise (a key of "chord,
+ * do re mi re do, chord" for every key from the first note to sing to the last) to sing along
+ * to. Both inputs are recorded the whole time; afterwards the same filter code the app uses
+ * runs over the recording here, from nothing learned, and gives back the pitch it heard
+ * against the notes to sing (note by note), and things to listen to: the mic, the sound to
+ * remove, that as the filter predicts the mic hears it, the mic with that removed, and that
+ * cleaned up further with what the filter learned of the leftover frequency by frequency.
  */
 (function (root) {
   'use strict';
@@ -17,7 +19,22 @@
   const listener = new SF.Listener();
   listener.recordSec = 120;
   const midi = new SF.Midi();
-  let out = null;
+  let out = null; // the piano, over MIDI
+  let kind = 'midi'; // what plays: 'midi' (the piano), 'samples' or 'synth' (the app's own sound)
+  const synth = new SF.Synth();
+  let bank = null;
+  let sp = null;
+  /** What the test plays on. */
+  function output() {
+    if (kind === 'midi') return out;
+    if (kind === 'samples') {
+      if (!bank) return null;
+      if (!sp || sp.bank !== bank) sp = new SF.SamplePlayer(bank);
+      return sp;
+    }
+    return synth;
+  }
+  const appSound = () => kind !== 'midi';
   let plan = { mode: 'stopped' };
   listener.planner = () => plan;
   let take = null; // the recording and what the filter made of it
@@ -55,7 +72,25 @@
       setDev(SF.inputError(e, e && e.device), 'bad');
       return;
     }
+    await useReference();
+    await fillDevices();
+    updateReady();
+  }
+  /** What to remove: the piano's USB audio, or the app's own sound. */
+  async function useReference() {
+    if (appSound()) {
+      await listener.setAppReference(true);
+      if (kind === 'samples' && !bank) bank = await SF.SampleBank.load();
+      $('appName').textContent =
+        kind === 'samples'
+          ? bank
+            ? 'The samples (' + bank.name + ') as the app sends them to the speakers'
+            : 'No samples in this browser: import them in the app first (Settings, Sound, Samples).'
+          : 'The built-in synth as the app sends it to the speakers';
+      return;
+    }
     try {
+      if (listener.refApp) await listener.setAppReference(false);
       const ds = await listener.devices();
       const named = ds.filter((d) => d.label);
       if (!named.length) await listener.askReference(null);
@@ -70,14 +105,37 @@
     const port = midi.preferred();
     out = port ? new SF.MidiOut(port, 0) : null;
     $('midiName').textContent = out ? out.name : midi.error || 'No piano found over MIDI. Is the USB cable in and the piano on?';
-    await fillDevices();
-    updateReady();
+  }
+  function updateKindUI() {
+    for (const b of document.querySelectorAll('#outSeg button')) b.setAttribute('aria-pressed', String(b.dataset.out === kind));
+    for (const el of document.querySelectorAll('.piano-only')) el.hidden = appSound();
+    for (const el of document.querySelectorAll('.app-only')) el.hidden = !appSound();
+    $('connectHint').textContent = appSound() ? 'Opens the mic. Play it through your speakers, not headphones.' : 'Opens the mic, the piano’s audio and the piano itself.';
+  }
+  for (const b of document.querySelectorAll('#outSeg button')) {
+    b.onclick = async () => {
+      if (running || kind === b.dataset.out) return;
+      kind = b.dataset.out;
+      saveFields();
+      updateKindUI();
+      if (listener.running) {
+        setDev('Switching…');
+        await useReference();
+        await fillDevices();
+      }
+      updateReady();
+    };
   }
   /** What is still missing before a test can run ('' when nothing). */
   function missing() {
     if (typeof SF.calibrationNotes !== 'function' || typeof listener.dump !== 'function')
       return 'The browser is still using an older copy of the app. Reload this page with Ctrl+Shift+R.';
     if (!listener.running) return 'The microphone isn’t open: press Connect.';
+    if (appSound()) {
+      if (kind === 'samples' && !bank) return 'No samples in this browser: import them in the app first (Settings, Sound, Samples), or pick the built-in synth.';
+      if (!listener.refApp) return 'Press Connect.';
+      return '';
+    }
     if (!listener.refStream) return 'The piano’s USB audio isn’t open: pick it in the list above (it shows as Line (P-Series)).';
     if (!out) return 'The piano isn’t connected over MIDI: is the USB cable in and the piano on? Then press Connect.';
     return '';
@@ -86,8 +144,9 @@
     // the button always answers: when something is missing it says what
     $('runBtn').disabled = running;
     const m = missing();
-    if (!m) setDev('Ready: ' + listener.micLabel + ', and ' + listener.refLabel + '.', 'ok');
+    if (!m) setDev('Ready: ' + listener.micLabel + ', and ' + (appSound() ? 'the ' + (kind === 'samples' ? 'samples' : 'built-in synth') + ' through your speakers' : listener.refLabel) + '.', 'ok');
     else if (listener.running || /older copy/.test(m)) setDev(m, 'bad');
+    estimate();
   }
   $('connectBtn').onclick = connect;
   $('micSel').onchange = async () => {
@@ -119,10 +178,10 @@
   });
   for (const id of ['velAcc', 'velSing']) $(id).oninput = () => ($(id + 'V').textContent = $(id).value);
   // the test's settings, remembered in this browser
-  const FIELDS = ['loNote', 'hiNote', 'fromNote', 'velAcc', 'velSing', 'guideOn'];
+  const FIELDS = ['loNote', 'hiNote', 'firstNote', 'lastNote', 'velAcc', 'velSing', 'guideOn'];
   function saveFields() {
     try {
-      const o = {};
+      const o = { kind };
       for (const id of FIELDS) o[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value;
       localStorage.setItem('sf-lab', JSON.stringify(o));
     } catch (e) {
@@ -131,24 +190,68 @@
   }
   try {
     const o = JSON.parse(localStorage.getItem('sf-lab') || 'null');
-    if (o)
+    if (o) {
       for (const id of FIELDS) {
         if (o[id] == null) continue;
         if ($(id).type === 'checkbox') $(id).checked = !!o[id];
         else $(id).value = o[id];
         if ($(id + 'V')) $(id + 'V').textContent = $(id).value;
       }
+      if (o.fromNote && !o.firstNote) $('firstNote').value = o.fromNote; // from before the range
+      if (['midi', 'samples', 'synth'].includes(o.kind)) kind = o.kind;
+    }
   } catch (e) {
     /* defaults */
   }
+  updateKindUI();
+  for (const id of ['firstNote', 'lastNote', 'loNote', 'hiNote']) $(id).addEventListener('input', () => estimate());
 
   // ---------------------------------------------------------------- the test
-  /** Three keys of "chord, five sung notes (do re mi re do), chord", going down from top. */
-  function exercise(top, guide, velAcc, velSing) {
+  /** The keys to sing, from the first note to the last: a whole tone apart (a semitone when
+   *  they are close), at most 16 of them. */
+  function roots(first, last) {
+    const n = Math.abs(last - first);
+    const dir = last >= first ? 1 : -1;
+    let step = n <= 3 ? 1 : 2;
+    if (n / step > 15) step = Math.ceil(n / 15);
+    const out = [];
+    for (let k = 0; k * step < n; k++) out.push(first + dir * k * step);
+    out.push(last);
+    return out;
+  }
+  /** What the test will be, from the fields: {roots, lo, hi} or {error}. */
+  function testPlan() {
+    const first = SF.parseNote($('firstNote').value);
+    const last = SF.parseNote($('lastNote').value);
+    if (!(first >= 28 && first <= 90) || !(last >= 28 && last <= 90)) return { error: 'write the first and last notes to sing like E3 and C3 (from E1 to F#6)' };
+    let lo = SF.parseNote($('loNote').value);
+    let hi = SF.parseNote($('hiNote').value);
+    if (!isFinite(lo) || !isFinite(hi) || hi - lo < 12) return { error: 'write the calibration’s notes like E2 and A4, at least an octave apart' };
+    const rs = roots(first, last);
+    // the calibration covers every key the exercise plays (its chords go a fifth above the root)
+    lo = Math.min(lo, Math.min(...rs));
+    hi = Math.max(hi, Math.max(...rs) + 7);
+    return { roots: rs, lo, hi };
+  }
+  const KEY_MS = 1300 + 5 * 700 + 500;
+  function estimate() {
+    const pl = testPlan();
+    if (pl.error) {
+      $('estimate').textContent = '';
+      $('runHint').textContent = 'Sing as you normally would, without headphones.';
+      return;
+    }
+    const cal = SF.calibrationNotes(pl.lo, pl.hi, 50, 62).dur;
+    const sec = Math.round((cal + 1500 + pl.roots.length * KEY_MS + 1800) / 1000);
+    $('estimate').textContent = 'This one: ' + pl.roots.length + (pl.roots.length === 1 ? ' key.' : ' keys.');
+    $('runHint').textContent = 'About ' + (sec >= 90 ? Math.round(sec / 6) / 10 + ' minutes' : sec + ' seconds') + '. Sing as you normally would, without headphones.';
+  }
+  /** A key of "chord, five sung notes (do re mi re do), chord" for every root. */
+  function exercise(rs, guide, velAcc, velSing) {
     const notes = [];
     const spans = [];
     let t = 0;
-    for (const root of [top, top - 1, top - 2]) {
+    for (const root of rs) {
       for (const d of [0, 4, 7]) notes.push({ p: root + d, vel: velAcc, t, d: 1200 });
       t += 1300;
       for (const s of [0, 2, 4, 2, 0]) {
@@ -185,21 +288,16 @@
       $('progBox').hidden = true;
       plan = { mode: 'stopped' };
       listener.sendPlan();
-      if (out) out.allOff();
+      const o = output();
+      if (o) o.allOff();
     }
     running = false;
     updateReady();
   }
   async function runTestNow() {
-    let lo = SF.parseNote($('loNote').value);
-    let hi = SF.parseNote($('hiNote').value);
-    if (!isFinite(lo) || !isFinite(hi) || hi - lo < 12) throw new Error('write the notes like E2 and A4, at least an octave apart');
-    const from = $('fromNote').value.trim() ? SF.parseNote($('fromNote').value) : NaN;
-    if ($('fromNote').value.trim() && !(from >= 28 && from <= 90)) throw new Error('write the note to sing from like E3');
-    const top = isFinite(from) ? from : Math.max(lo + 4, Math.min(hi - 4, Math.round((lo + hi) / 2) - 2));
-    // the calibration covers every key the exercise plays
-    lo = Math.min(lo, top - 2);
-    hi = Math.max(hi, top + 7);
+    const pl = testPlan();
+    if (pl.error) throw new Error(pl.error);
+    const { lo, hi } = pl;
     saveFields();
     running = true;
     updateReady();
@@ -208,12 +306,14 @@
     SF.audio.resume();
     const velAcc = +$('velAcc').value;
     const velSing = +$('velSing').value;
-    const tap = SF.tapOutput(out, (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now()));
-    // a fresh start: nothing learned, and the recording holds only this test
-    listener.savedRoom = null;
-    listener.startEngine();
+    const tap = SF.tapOutput(output(), (at, p, on) => listener.markKey(at, p, on), () => listener.markAllOff(SF.now()));
     const cal = SF.calibrationNotes(lo, hi, velAcc, velSing);
-    const ex = exercise(top, $('guideOn').checked, velAcc, velSing);
+    const ex = exercise(pl.roots, $('guideOn').checked, velAcc, velSing);
+    if (kind === 'samples') await bank.prepare(cal.notes.map((n) => n.p).concat(ex.notes.map((n) => n.p)));
+    // a fresh start: nothing learned, and the recording holds only this test (and all of it)
+    listener.savedRoom = null;
+    listener.recordSec = Math.max(120, Math.ceil((cal.dur + ex.dur) / 1000) + 30);
+    listener.startEngine();
     const t0 = SF.now() + 1000;
     const te = t0 + cal.dur + 1500;
     const tEnd = te + ex.dur + 800;
@@ -230,7 +330,7 @@
     let sent = 0;
     while (SF.now() < tEnd) {
       const now = SF.now();
-      if (now < te - 300) $('phase').textContent = 'Stay quiet: the piano is calibrating (' + Math.ceil((te - now) / 1000) + ' s)';
+      if (now < te - 300) $('phase').textContent = 'Stay quiet: ' + (appSound() ? 'calibrating' : 'the piano is calibrating') + ' (' + Math.ceil((te - now) / 1000) + ' s)';
       else {
         if (plan.mode !== 'play') {
           plan = { mode: 'play', from: te - 500, until: tEnd, spans: ex.spans.map((s) => [te + s[0], te + s[1]]) };
@@ -252,7 +352,7 @@
     $('phase').textContent = 'Working it out…';
     let d;
     d = await listener.dump();
-    d.meta.lab = { lo, hi, from: top, velAcc, velSing, guide: $('guideOn').checked, t0, te, tEnd, calDur: cal.dur, spans: ex.spans.map((s) => [te + s[0], te + s[1], s[2]]), at: new Date().toISOString(), mic: listener.micLabel, piano: listener.refLabel };
+    d.meta.lab = { lo, hi, roots: pl.roots, from: pl.roots[0], kind, velAcc, velSing, guide: $('guideOn').checked, t0, te, tEnd, calDur: cal.dur, spans: ex.spans.map((s) => [te + s[0], te + s[1], s[2]]), at: new Date().toISOString(), mic: listener.micLabel, piano: listener.refName, outputLag: appSound() ? SF.audio.outputLag() : null };
     take = await processTake(d, (f) => ($('prog').style.width = f * 100 + '%'));
     $('phase').hidden = true;
     $('progBox').hidden = true;
@@ -272,7 +372,8 @@
     for (const b of blocks) off += b[1] - b[2] * 1000;
     off /= blocks.length;
     const tOf = (f) => off + (f / sr) * 1000; // context frame -> page time
-    const pf = new SF.PianoFilter(sr, {});
+    // (the app's own sound reaches the mic later than the piano's audio does: the speakers' delay)
+    const pf = new SF.PianoFilter(sr, meta.refKind === 'app' ? { maxLag: 0.45 } : {});
     const tr = new SF.PitchTracker(sr, { size: W, gateDb: meta.gateDb });
     const n = mic.length;
     const echo = new Float32Array(n);
@@ -371,21 +472,59 @@
     // how loud the voice was at the mic against the piano playing the same notes
     const median = (a) => (a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1] : null);
     const vs = vDb.length >= 10 && pDb.length >= 10 ? median(vDb) - median(pDb) : null;
+    const app = meta.refKind === 'app';
+    const what = app ? 'the app’s sound' : 'the piano';
+    const What = app ? 'The app’s sound' : 'Piano';
     $('nDelay').textContent = pf.delay == null ? 'not found' : ((pf.delay / sr) * 1000).toFixed(1) + ' ms';
+    $('nDelayNote').textContent = app ? 'Delay from the app’s sound to the mic, through the speakers' : 'Delay from the piano’s audio to the mic';
     $('nCal').textContent = cal == null ? '–' : cal.toFixed(1) + ' dB';
-    $('nCalNote').textContent = 'Piano removed while you were quiet' + (calPost != null ? ' (' + calPost.toFixed(1) + ' dB after the clean-up, in “What’s left”)' : '');
+    $('nCalNote').textContent = What + ' removed while you were quiet' + (calPost != null ? ' (' + calPost.toFixed(1) + ' dB after the clean-up, in “What’s left”)' : '');
+    $('nVoiceNote').textContent = 'Your voice against ' + what + ' playing your notes, at the mic (above 0: you were louder)';
+    $('echoLabel').textContent = app ? 'The app’s sound, as the filter predicts the mic hears it' : 'The piano, as the filter predicts the mic hears it';
+    $('refLabel').textContent = app ? 'What the app played' : 'The piano’s own audio';
+    $('refSmall').textContent = app ? 'as it went to the speakers' : 'from the USB cable';
     $('nSing').textContent = all ? Math.round((100 * heard) / all) + '%' : '–';
     const vr = vs == null ? null : Math.round(vs);
     $('nVoice').textContent = vr == null ? '–' : (vr > 0 ? '+' : vr < 0 ? '−' : '') + Math.abs(vr) + ' dB';
     let v;
-    if (pf.delay == null) v = 'It never found the delay between the piano’s audio and the mic, so it couldn’t remove anything. Is the piano loud enough to hear in the room?';
-    else if (cal != null && cal < 6) v = 'It removed very little of the piano. Listen to “What’s left”: if the piano is nearly as loud as in “The mic”, the mic may still be changing its own sound, or the setup changed during the test.';
-    else if (all && heard / all < 0.6) v = 'It removed the piano, but heard only part of your singing. “What’s left” shows whether your voice is clear there.';
-    else v = 'It removed the piano and heard most of your singing. “What’s left” should sound like your voice alone.';
+    if (pf.noEcho) v = 'The mic didn’t hear ' + what + ' at all (headphones?), so there was nothing to remove: it listened to the mic as it is.';
+    else if (pf.delay == null) v = 'It never found the delay between ' + (app ? 'the app’s sound' : 'the piano’s audio') + ' and the mic, so it couldn’t remove anything. Is it loud enough to hear in the room?';
+    else if (cal != null && cal < 6) v = 'It removed very little of ' + what + '. Listen to “What’s left”: if ' + what + ' is nearly as loud as in “The mic”, the mic may still be changing its own sound, or the setup changed during the test.';
+    else if (all && heard / all < 0.6) v = 'It removed ' + what + ', but heard only part of your singing. “What’s left” shows whether your voice is clear there.';
+    else v = 'It removed ' + what + ' and heard most of your singing. “What’s left” should sound like your voice alone.';
     const share = (k) => Math.round((100 * k) / Math.max(1, all)) + '%';
     v += all && heard < all ? ' In your sung notes it heard you ' + share(heard) + ' of the time, couldn’t tell you from the piano ' + share(unsure) + ', and heard no singing ' + share(all - heard - unsure) + '.' : '';
     if (vs != null && vs < -3 && lab.guide && heard < 0.9 * all)
-      v += ' At the mic, the piano playing your notes was about ' + Math.round(-vs) + ' dB louder than your voice: where it is that much louder, it can’t always tell you apart. A lower “Your notes touch” helps.';
+      v += ' At the mic, ' + what + ' playing your notes was about ' + Math.round(-vs) + ' dB louder than your voice: where it is that much louder, it can’t always tell you apart. A lower “Your notes touch” helps.';
+    // how much of each note it heard (low notes are the hard ones)
+    const per = new Map();
+    for (const fr of tk.frames) {
+      const s = lab.spans.find((x) => fr.t >= x[0] + 120 && fr.t < x[1] - 120);
+      if (!s) continue;
+      let c = per.get(s[2]);
+      if (!c) per.set(s[2], (c = { n: 0, heard: 0 }));
+      c.n++;
+      if (fr.voiced) c.heard++;
+    }
+    const box = $('byNote');
+    box.innerHTML = '';
+    let worst = null;
+    for (const p of [...per.keys()].sort((a, b) => a - b)) {
+      const c = per.get(p);
+      const share = c.n ? c.heard / c.n : 0;
+      if (!worst || share < worst.share) worst = { p, share };
+      const d = document.createElement('div');
+      d.title = SF.noteName(p) + ': heard ' + Math.round(share * 100) + '% of the time';
+      const b = document.createElement('b');
+      b.textContent = Math.round(share * 100) + '%';
+      const bar = document.createElement('i');
+      const fill = document.createElement('span');
+      fill.style.width = share * 100 + '%';
+      bar.append(fill);
+      d.append(SF.noteName(p), b, bar);
+      box.append(d);
+    }
+    if (worst && per.size > 3 && worst.share < 0.6 && all && heard / all >= 0.6) v += ' It heard you least on ' + SF.noteName(worst.p) + ' (' + Math.round(worst.share * 100) + '%).';
     $('verdict').textContent = v;
     $('results').hidden = false;
     drawPitch(tk);

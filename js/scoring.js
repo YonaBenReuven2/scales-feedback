@@ -32,6 +32,7 @@
           endGrace: 0.12,
           chordGrace: 0.08, // extra after a reference chord: the piano is still ringing
           latency: 30, // ms the mic is late, beyond the analysis window
+          clickNear: null, // (t) => true when a metronome click sounded around page time t
         },
         opts || {}
       );
@@ -46,8 +47,9 @@
       this.trace = []; // {P, midi, st}
       this.live = { midi: null, target: null, cents: null, status: 'idle', listening: false, source: '' };
       this.done = new Set(); // segments already scored
-      this.session = { started: Date.now(), rounds: [] };
+      this.session = { started: Date.now(), rounds: [], notes: [] };
       this.byRound = new Map(); // round index -> latest result this session
+      this.prevCache = new Map();
     }
     statusOf(c) {
       const t = this.opts.tolerance;
@@ -73,6 +75,8 @@
     frame(fr) {
       const p = this.player;
       if (!p.ex) return;
+      // a metronome click drowned this frame out: it says nothing about the voice
+      if (!fr.voiced && this.opts.clickNear && this.opts.clickNear(fr.t - this.opts.latency)) fr = Object.assign({}, fr, { source: 'click' });
       const P = p.positionAt(fr.t - this.opts.latency);
       if (P == null) {
         this.live.listening = false;
@@ -98,7 +102,14 @@
         const [a, b, P0, P1] = this.window(seg, n);
         if (P >= P0 && P < P1) near = true;
         if (P >= a && P < b) targets.push(n);
-        else if (P >= P0 && P < P1) edges.push(n);
+        else if (P >= P0 && P < P1) {
+          edges.push(n);
+          // how soon the voice settles on the note counts from its very start
+          if (P < a && fr.voiced && Math.abs(cents(fr.midi, n.pitch, this.opts.octaveFree)) <= this.opts.tolerance) {
+            const acc = this.accFor(seg, n);
+            if (acc.firstOk == null) acc.firstOk = P;
+          }
+        }
       });
       live.listening = near;
       let st = 'idle';
@@ -132,16 +143,12 @@
         // 'learning' / 'unsure': the piano can't be told apart from you here, so these
         // frames say nothing either way (but they are counted: a note judged from only a few
         // frames gets no verdict)
-        const unknown = fr.source === 'learning' || fr.source === 'unsure';
+        const unknown = fr.source === 'learning' || fr.source === 'unsure' || fr.source === 'click';
         for (const n of targets) {
           const k = this.keyOf(seg, n);
           if (keys.has(k)) continue;
           keys.add(k);
-          let a = this.acc.get(k);
-          if (!a) {
-            a = { frames: 0, all: 0, voiced: 0, cents: [], voices: new Map(), seg, note: n };
-            this.acc.set(k, a);
-          }
+          const a = this.accFor(seg, n, k);
           a.all++;
           if (unknown) continue;
           a.frames++;
@@ -152,6 +159,7 @@
             a.voiced++;
             a.cents.push(c);
             a.voices.set(target.voice, (a.voices.get(target.voice) || 0) + 1);
+            if (a.firstOk == null && Math.abs(c) <= this.opts.tolerance) a.firstOk = P;
           }
         }
         live.target = best.pitch;
@@ -161,6 +169,63 @@
       live.status = st;
       this.trace.push({ P, midi: fr.voiced ? fr.midi : null, st: near ? st : 'idle' });
       if (this.trace.length > 3000) this.trace.splice(0, 1000);
+    }
+    accFor(seg, n, key) {
+      const k = key || this.keyOf(seg, n);
+      let a = this.acc.get(k);
+      if (!a) {
+        a = { frames: 0, all: 0, voiced: 0, cents: [], voices: new Map(), seg, note: n, firstOk: null };
+        this.acc.set(k, a);
+      }
+      return a;
+    }
+    /** The note sung just before n in its key (same voice), or null for the first. */
+    prevOf(seg, n) {
+      const p = this.player;
+      const ck = seg.r + ':' + (p.ex.voices > 1 ? n.voice : 0);
+      let m = this.prevCache.get(ck);
+      if (!m || m.ex !== p.ex) {
+        m = { ex: p.ex, prev: new Map() };
+        const list = p.ex.rounds[seg.r].notes.filter((x) => x.role === 'sing' && (p.ex.voices <= 1 || x.voice === n.voice)).sort((a, b) => a.s0 - b.s0);
+        // notes starting together (a chord in the sung part) share what came before them
+        let before = null;
+        let groupS0 = -Infinity;
+        let groupLast = null;
+        for (const x of list) {
+          if (x.s0 - groupS0 > 1e-3) {
+            before = groupLast;
+            groupS0 = x.s0;
+          }
+          m.prev.set(x.id, before);
+          groupLast = x;
+        }
+        this.prevCache.set(ck, m);
+      }
+      return m.prev.get(n.id) || null;
+    }
+    /** What the breakdown keeps of a judged note. */
+    detail(a, res) {
+      const p = this.player;
+      const n = a.note;
+      const rd = p.ex.rounds[a.seg.r];
+      const [, , P0] = this.window(a.seg, n);
+      const prev = this.prevOf(a.seg, n);
+      const cs = a.cents;
+      let sd = null;
+      if (cs.length >= 4) {
+        const m = SF.mean(cs);
+        sd = Math.sqrt(cs.reduce((s, c) => s + (c - m) * (c - m), 0) / cs.length);
+      }
+      return {
+        p: n.pitch,
+        deg: rd.key ? SF.solfege(n.pitch, rd.key.doPc) : null,
+        dir: prev ? Math.sign(n.pitch - prev.pitch) : null,
+        st: res.status,
+        c: res.cents == null ? null : Math.round(res.cents),
+        rt: a.firstOk == null ? null : Math.round((Math.max(0, a.firstOk - P0) / p.speed) * 1000),
+        sd: sd == null ? null : Math.round(sd),
+        r: a.seg.r,
+      };
     }
     segmentAt(P) {
       const p = this.player;
@@ -184,6 +249,10 @@
         const res = this.verdict(a);
         this.results.set(k, res);
         this.last = { res, note: a.note, seg: a.seg };
+        if (res.status !== 'none') {
+          this.session.notes.push(this.detail(a, res));
+          if (this.session.notes.length > 5000) this.session.notes.splice(0, 1000);
+        }
         this.emit('note', { res, note: a.note, seg: a.seg });
       }
       for (const seg of p.past.concat(p.queue)) {
@@ -289,7 +358,10 @@
           meta || {}
         )
       );
+      if (session.notes && session.notes.length && SF.Report) list[list.length - 1].bd = SF.Report.compact(session.notes);
       if (list.length > 200) list.splice(0, list.length - 200);
+      // the breakdowns (by scale degree, note and timing) only for the latest runs: they are bigger
+      for (let i = 0; i < list.length - 60; i++) delete list[i].bd;
       SF.store.set('history', all);
     },
     forExercise(exId) {

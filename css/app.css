@@ -101,6 +101,8 @@ svg { display: block; }
 .dot.ok { background: var(--hit); }
 .dot.warn { background: var(--close); }
 .icon-btn { width: 36px; height: 36px; padding: 0; display: grid; place-items: center; }
+.tempo .icon-btn { margin-left: 4px; }
+#filterBtn[aria-pressed='false'] { color: var(--muted); }
 
 /* ---------- key strip ---------- */
 .keys {
@@ -132,38 +134,43 @@ svg { display: block; }
 /* ---------- stage ---------- */
 main { position: relative; min-height: 0; }
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#cv { touch-action: none; } /* the keys, the edges and the scrolling take the touches */
 .hud { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; padding: 14px 18px; pointer-events: none; gap: 16px; }
 .keyname { font-family: var(--serif); font-size: clamp(28px, 4.2vw, 52px); font-weight: 560; line-height: 1; letter-spacing: -0.01em; font-variation-settings: 'opsz' 96; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6); }
 .info { color: var(--muted); margin-top: 8px; font-size: 13px; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8); }
-/* the tuner: what you are singing, big enough to read from the bench */
+/* the tuner: what you are singing, readable from the bench at a glance. On the right, or
+   moved out of the notes' way (a key at a time) */
 .tuner {
-  width: min(330px, 46vw);
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  width: min(250px, 44vw);
   background: rgba(15, 26, 43, 0.86);
   border: 2px solid var(--line);
-  border-radius: 16px;
-  padding: 12px 16px 12px;
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
-  transition: border-color 120ms linear;
+  border-radius: 14px;
+  padding: 9px 12px 9px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  transition: border-color 120ms linear, transform 420ms cubic-bezier(0.3, 0.7, 0.2, 1);
 }
 .tuner.hit { border-color: var(--hit); box-shadow: 0 0 0 1px var(--hit), 0 0 34px rgba(91, 214, 155, 0.35); }
 .tuner.close { border-color: var(--close); box-shadow: 0 0 30px rgba(242, 193, 78, 0.28); }
 .tuner.off { border-color: var(--off); box-shadow: 0 0 30px rgba(240, 122, 106, 0.3); }
-.t-head { display: flex; justify-content: space-between; align-items: baseline; color: var(--muted); font-size: 15px; }
-.t-head .syl { font-family: var(--serif); font-style: italic; font-size: 20px; color: var(--voice); }
-.t-main { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 2px 0 8px; min-height: 66px; }
-.t-note { font-size: 62px; font-weight: 750; line-height: 1; letter-spacing: -0.02em; }
-.t-cents { font-size: 34px; font-weight: 700; line-height: 1; }
+.t-head { display: flex; justify-content: space-between; align-items: baseline; color: var(--muted); font-size: 13.5px; }
+.t-head .syl { font-family: var(--serif); font-style: italic; font-size: 17px; color: var(--voice); }
+.t-main { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 1px 0 5px; min-height: 46px; }
+.t-note { font-size: 44px; font-weight: 750; line-height: 1; letter-spacing: -0.02em; }
+.t-cents { font-size: 24px; font-weight: 700; line-height: 1; }
 .tuner.hit .t-note, .tuner.hit .t-cents { color: var(--hit); }
 .tuner.close .t-note, .tuner.close .t-cents { color: var(--close); }
 .tuner.off .t-note, .tuner.off .t-cents { color: var(--off); }
 .tuner.idle .t-note { color: #44546e; }
-.t-meter { position: relative; height: 26px; }
-.t-meter .zones { position: absolute; inset: 8px 0; border-radius: 5px; opacity: 0.55; }
+.t-meter { position: relative; height: 20px; }
+.t-meter .zones { position: absolute; inset: 6px 0; border-radius: 4px; opacity: 0.55; }
 .t-meter .mid { position: absolute; left: 50%; top: 2px; bottom: 2px; width: 2px; margin-left: -1px; background: var(--text); opacity: 0.7; }
-.t-meter .needle { position: absolute; top: 0; left: 50%; width: 8px; height: 26px; margin-left: -4px; border-radius: 4px; background: var(--text); box-shadow: 0 0 14px currentColor; opacity: 0; transition: left 60ms linear; }
+.t-meter .needle { position: absolute; top: 0; left: 50%; width: 7px; height: 20px; margin-left: -3.5px; border-radius: 4px; background: var(--text); box-shadow: 0 0 12px currentColor; opacity: 0; transition: left 60ms linear; }
 .t-meter .needle.on { opacity: 1; }
-.t-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 2px; }
-.t-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; font-size: 14px; color: var(--muted); }
+.t-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+.t-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; font-size: 12.5px; color: var(--muted); }
 .t-foot #tState.on { color: var(--hit); }
 .t-foot #tLast { font-weight: 650; }
 .toast {
@@ -197,11 +204,15 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   transform: translateX(105%); transition: transform 160ms ease-out; right: 0;
   box-shadow: -18px 0 40px rgba(0, 0, 0, 0.35);
 }
+.drawer.wide { width: min(580px, 100vw); }
 .drawer.left { left: 0; right: auto; border-left: 0; border-right: 1px solid var(--line); transform: translateX(-105%); box-shadow: 18px 0 40px rgba(0, 0, 0, 0.35); }
 .drawer.open { transform: none; }
 .drawer header { position: sticky; top: 0; background: var(--panel); display: flex; align-items: center; justify-content: space-between; padding: 14px 0 10px; z-index: 1; }
 .drawer h2 { font-family: var(--serif); font-weight: 560; font-size: 22px; margin: 0; font-variation-settings: 'opsz' 48; }
 .drawer h3 { font-size: 15px; margin: 22px 0 8px; font-weight: 650; }
+.drawer h4 { font-size: 13.5px; margin: 20px 0 8px; font-weight: 650; color: var(--text); }
+/* what there is to set for the sound chosen above it */
+.sub-box { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; margin: 8px 0 4px; }
 .drawer .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 8px; line-height: 1.5; }
 .drawer .warn { color: var(--close); font-size: 12.5px; margin: 6px 0; }
 .drawer .hint a { color: var(--voice); }
@@ -228,7 +239,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
 .lib-item .tag.voices { color: var(--sage); border-color: #3e6457; }
 
 .res-list { display: flex; flex-direction: column; gap: 4px; }
-.res-row { display: grid; grid-template-columns: 52px 1fr 64px; gap: 10px; align-items: center; font-size: 13px; }
+.res-row { display: grid; grid-template-columns: 52px 1fr 84px; gap: 10px; align-items: center; font-size: 13px; }
 /* live input levels under the two input lists: does each one hear something? */
 .lvl { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--ink-deep); overflow: hidden; margin-top: 6px; }
 .lvl i { display: block; height: 100%; width: 0; background: var(--hit); transition: width 60ms linear; }
@@ -248,9 +259,51 @@ kbd { background: var(--ink-deep); border: 1px solid var(--line); border-bottom-
 
 @media (max-width: 760px) {
   .ex-btn { min-width: 0; flex: 1 1 100%; max-width: none; }
-  .t-note { font-size: 44px; }
-  .t-cents { font-size: 26px; }
+  .t-note { font-size: 34px; }
+  .t-cents { font-size: 20px; }
+  .t-main { min-height: 36px; }
 }
+/* ---------- results ---------- */
+.tabs { display: inline-flex; margin: 0 auto 0 16px; }
+.run-head { color: var(--muted); margin: 10px 0 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.tile { background: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px 10px; display: flex; flex-direction: column; gap: 1px; }
+.tile .tl { color: var(--muted); font-size: 12.5px; }
+.tile b { font-size: 22px; font-weight: 650; line-height: 1.2; letter-spacing: -0.01em; }
+.tile .ts { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.insights { margin: 0; padding-left: 18px; display: grid; gap: 6px; line-height: 1.45; }
+.insights .up { color: var(--hit); }
+.insights .down { color: var(--off); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.st-hit { background: var(--hit); }
+.st-close { background: var(--close); }
+.st-off { background: var(--off); }
+.st-silent { background: var(--silent); }
+/* a thin bar per group of notes, split by verdict, with a 2px gap between the parts */
+.sbar { height: 8px; border-radius: 4px; display: flex; gap: 2px; overflow: hidden; background: var(--ink-deep); min-width: 30px; }
+.sbar i { display: block; height: 100%; flex-basis: 0; min-width: 2px; }
+.deg-table { display: grid; grid-template-columns: 44px repeat(3, minmax(0, 1fr)); gap: 6px 10px; align-items: center; font-size: 12.5px; }
+.deg-table .dh { color: var(--muted); font-size: 12px; }
+.deg-table .deg { font-family: var(--serif); font-style: italic; font-size: 16px; color: var(--voice); }
+.deg-table .cell { display: grid; grid-template-columns: 1fr auto; gap: 3px 6px; padding: 5px 7px; border-radius: 7px; border: 1px solid transparent; background: rgba(10, 19, 32, 0.5); }
+.deg-table .cell .sbar { grid-column: 1 / -1; }
+.deg-table .cell .cn { color: var(--text); }
+.deg-table .cell .cc { color: var(--muted); text-align: right; }
+.deg-table .cell.weak { border-color: var(--off); }
+.deg-table .cell.none { color: #44546e; text-align: center; background: none; }
+.res-row.wide { grid-template-columns: 130px 1fr 52px; }
+.chart { position: relative; }
+.chart svg { display: block; overflow: visible; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .zero { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .tick { fill: var(--muted); font: 11px var(--ui); }
+.chart .line { fill: none; stroke: var(--voice); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .pt { fill: var(--voice); stroke: var(--panel); stroke-width: 2; }
+.chart .pt-hi { fill: none; stroke: var(--text); stroke-width: 2; }
+.chart .tip { position: absolute; transform: translateX(-50%); background: var(--ink-deep); border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; font-size: 12px; white-space: nowrap; pointer-events: none; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
 @media (prefers-reduced-motion: reduce) {
   .drawer { transition: none; }
   .meter i, .t-meter .needle, .tuner { transition: none; }

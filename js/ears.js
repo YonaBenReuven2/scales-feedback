@@ -4,12 +4,14 @@
  * notes sent to the piano or the drawing; otherwise on the page itself. Either way it
  * is driven by the same messages:
  *
- *   in   start {sr, hasRef, gateDb, minClarity, saved}   a fresh filter for new inputs
+ *   in   start {sr, hasRef, refKind, use, gateDb, minClarity, saved}   a fresh filter for new
+ *                                     inputs (refKind: 'piano' USB audio, or 'app' sound)
  *        block {f, a, b, perf, ctx}   512 samples of mic (a) and piano audio (b) from
  *                                     context frame f, forwarded at page time perf, when
  *                                     the audio clock read ctx seconds
  *        keys {events: [{t, p, on}]}  keys the app pressed and released (page time)
  *        plan {plan}                  when singing is expected (see Listener.planner)
+ *        use {on}                     filter, or just listen (still learning the room)
  *        gate {db} · room {st} · forget · save · stop
  *   out  frame {fr} · level {mic, ref} · status {st} · room {st}
  *
@@ -64,6 +66,9 @@
         }
         case 'dump':
           return this.dump();
+        case 'use':
+          this.use = m.on !== false;
+          return;
         case 'gate':
           this.gateDb = m.db;
           if (this.tracker) this.tracker.gateDb = m.db;
@@ -90,10 +95,14 @@
       this.sr = m.sr;
       this.recordSec = m.recordSec || RECORD_SEC;
       this.hasRef = !!m.hasRef;
+      this.refKind = m.refKind || 'piano';
+      this.use = m.use !== false;
       this.gateDb = m.gateDb;
       if (!this.tracker || this.tracker.det.sr !== this.sr) this.tracker = new SF.PitchTracker(this.sr, { gateDb: m.gateDb, minClarity: m.minClarity });
       else this.tracker.gateDb = m.gateDb;
-      this.pf = new SF.PianoFilter(this.sr, {});
+      // the app's own sound reaches the mic after the computer's output delay as well, which
+      // can be long (Bluetooth speakers): look further for it
+      this.pf = new SF.PianoFilter(this.sr, this.refKind === 'app' ? { maxLag: 0.45 } : {});
       if (m.saved) this.saved = m.saved;
       if (this.saved) this.pf.importState(this.saved);
       this.pfFrame0 = null; // context frame of the filter's first sample
@@ -172,7 +181,7 @@
       while (this.lastEnd + 512 <= pf.done) {
         this.lastEnd += 512;
         const end = this.lastEnd;
-        const fr = SF.analyzeFrame(pf, this.tracker, end, this.perfOfFrame(this.pfFrame0 + end - W / 2));
+        const fr = SF.analyzeFrame(pf, this.tracker, end, this.perfOfFrame(this.pfFrame0 + end - W / 2), { bypass: !this.use });
         this.post({ type: 'frame', fr });
         const r3 = (x) => (x == null ? null : Math.round(x * 1000) / 1000);
         this.recFrames.push([this.pfFrame0 + end, fr.source, fr.voiced ? r3(fr.midi) : null, fr.why || null, r3(fr.presence), r3(fr.dev), r3(fr.clarity), r3(fr.raw), Math.round(fr.micDb), Math.round(fr.echoDb)]);
@@ -209,6 +218,8 @@
           measured: pf.kN.reduce((n, k) => n + (k >= 6 ? 1 : 0), 0), // keys measured on their own
           micDrift: Math.round(pf.micDrift * 10) / 10, // dB the piano's level at the mic moved between chords
           runCancel: pf.recentCancel == null ? null : Math.round(pf.recentCancel * 10) / 10, // dB removed lately
+          noEcho: !!pf.noEcho, // the mic doesn't hear the piano (headphones?)
+          use: this.use !== false,
         },
       });
     }
@@ -254,6 +265,8 @@
         v: 1,
         sr: this.sr,
         hasRef: this.hasRef,
+        refKind: this.refKind, // 'piano' (its USB audio) or 'app' (the app's own sound)
+        use: this.use,
         gateDb: this.gateDb,
         offsetMs: this.offsetMs,
         pfFrame0: this.pfFrame0,
